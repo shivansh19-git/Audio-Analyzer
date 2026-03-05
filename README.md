@@ -197,3 +197,56 @@ Prepare audio pair for comparison by handling length mismatches, after ref audio
 </details>
 
 ---
+
+## Pitch Analysis
+
+---
+├─ Extract pitch using PYIN algorithm → f0 contour<br>
+├─ Detect musical key from chroma features<br>
+├─ Calculate key offset (semitones)<br>
+└─ Transpose user pitch to match reference key
+
+<details>
+<summary>
+    <strong id="1">
+        Details : 
+    </strong>
+</summary>
+
+### Pitch Extraction
+
+---
+Pitch extraction estimates the fundamental frequency (F0) of a voice over time.
+<br>In singing analysis:
+
+    Audio → Pitch Curve → Melody Contour
+
+Done through pYin algorithm as above.
+
+---
+
+### Key Detection and Transpose
+
+---
+This module allows your system to handle singers who sing in a different key than the reference track.
+
+    Reference song key → C Major
+    User sings in → D Major
+
+Musically correct, but all notes are shifted by +2 semitones.
+
+    Detect key → Estimate pitch shift → Transpose → Compare
+
+Median Pitch is converted to MIDI Note number using: `midi_note = 12 * np.log2(median_f0 / 440) + 69`
+
+---
+
+### Handle Key shifts
+
+---
+A key shift (transposition) is a constant pitch offset applied to all notes.
+
+    Done through: f0_transposed = f0 * (2 ** (semitones / 12))
+</details>
+
+---
