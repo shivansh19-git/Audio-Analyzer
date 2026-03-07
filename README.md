@@ -2,6 +2,10 @@
 
 A sophisticated Flask-based web application that analyzes singing performance by comparing user recordings against reference songs using advanced DSP algorithms.
 
+### Machine Learning Model
+**Emotion Classification:** Implemented using Support Vector Machine (SVM) trained on speech features. The model is persisted using pickle for fast loading and real-time predictions on audio segments.<br>
+Dataset was retrieved through [MIR](http://mir.dei.uc.pt/downloads.html) - Bi-modal (audio and lyrics) emotion dataset
+
 ---
 
 ## 📋 Table of Contents
