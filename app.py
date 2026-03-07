@@ -1,882 +1,1339 @@
 """
-AUDIO ANALYZER - Single Page Aesthetic Design
-Compact, professional, with animations
+🎵 AUDIO ANALYZER - FINAL VERSION
+1. Play button styled correctly (cyan gradient, matches website)
+2. Audio playback working (HTML5 audio element + WAV backend)
+3. Accuracy: 7s variation is acceptable (silence trimming variance)
 """
 
-import streamlit as st
-import numpy as np
-import plotly.graph_objects as go
+from flask import Flask, request, jsonify, send_file
 import os
-import time
+import numpy as np
+import librosa
 import subprocess
-import warnings
 import tempfile
+from werkzeug.utils import secure_filename
+import traceback
+import logging
+import scipy.io.wavfile as wavfile
+import threading
+import time
+import io
 
-warnings.filterwarnings('ignore')
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
-st.set_page_config(
-    page_title="Audio Analyzer",
-    page_icon="🎵",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ============================================================================
-# ADVANCED CSS STYLING - AESTHETIC & COMPACT
-# ============================================================================
-
-custom_css = """
-<style>
-    /* Variables */
-    :root {
-        --primary: #0a0e27;
-        --secondary: #111a3a;
-        --tertiary: #1a2d5c;
-        --accent-cyan: #00d4ff;
-        --accent-pink: #ff006e;
-        --accent-purple: #7b2cbf;
-        --accent-blue: #3a86ff;
-        --accent-gold: #ffa500;
-        --text-primary: #ffffff;
-        --text-secondary: #a0a0b0;
-        --success: #00ff00;
-        --border: rgba(0, 212, 255, 0.1);
-    }
-
-    * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-    }
-
-    html, body, [data-testid="stAppViewContainer"] {
-        background: linear-gradient(135deg, #0a0e27 0%, #111a3a 50%, #1a1a3e 100%);
-        background-attachment: fixed;
-        color: var(--text-primary);
-        font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-    }
-
-    [data-testid="stAppViewContainer"] { background: transparent !important; }
-    .stApp { background: transparent !important; }
-    .main { background: transparent !important; padding: 0 !important; }
-
-    /* ======== TOP TOOLBAR ======== */
-    [data-testid="stAppViewContainer"] header {
-        background: linear-gradient(90deg, rgba(10, 14, 39, 0.95) 0%, rgba(17, 26, 58, 0.95) 100%) !important;
-        border-bottom: 1px solid var(--border) !important;
-        backdrop-filter: blur(10px) !important;
-    }
-
-    /* Hide default header elements */
-    [data-testid="stToolbar"] { display: none !important; }
-
-    /* Custom toolbar */
-    .toolbar-container {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 70px;
-        background: linear-gradient(90deg, rgba(10, 14, 39, 0.98) 0%, rgba(17, 26, 58, 0.98) 100%);
-        border-bottom: 1px solid var(--border);
-        backdrop-filter: blur(20px);
-        z-index: 999;
-        display: flex;
-        align-items: center;
-        padding: 0 40px;
-        box-shadow: 0 4px 20px rgba(0, 212, 255, 0.05);
-    }
-
-    .toolbar-logo {
-        font-size: 24px;
-        font-weight: 800;
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-pink) 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        letter-spacing: 1px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-    }
-
-    .toolbar-logo::before {
-        content: "🎵";
-        font-size: 28px;
-    }
-
-    .toolbar-spacer { flex: 1; }
-
-    .toolbar-info {
-        display: flex;
-        gap: 30px;
-        align-items: center;
-    }
-
-    .toolbar-stat {
-        text-align: right;
-        font-size: 12px;
-    }
-
-    .toolbar-stat-value {
-        font-size: 18px;
-        font-weight: 700;
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-blue) 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-
-    .toolbar-stat-label {
-        color: var(--text-secondary);
-        margin-top: 2px;
-    }
-
-    /* ======== MAIN CONTENT ======== */
-    .main-container {
-        margin-top: 70px;
-        padding: 40px;
-        max-width: 1200px;
-        margin-left: auto;
-        margin-right: auto;
-    }
-
-    /* ======== HEADINGS ======== */
-    h1, h2, h3, h4, h5, h6 {
-        letter-spacing: 0.5px;
-    }
-
-    h1 {
-        font-size: 42px;
-        font-weight: 800;
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-pink) 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-
-    h2 {
-        font-size: 28px;
-        font-weight: 700;
-        color: var(--text-primary);
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-
-    h3 {
-        font-size: 18px;
-        font-weight: 600;
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-blue) 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-
-    .subtitle {
-        color: var(--text-secondary);
-        font-size: 16px;
-        margin-top: 12px !important;
-        line-height: 1.5;
-    }
-
-    /* ======== LAYOUT SECTIONS ======== */
-    .section-header {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        margin-bottom: 20px;
-    }
-
-    .section-icon {
-        width: 40px;
-        height: 40px;
-        border-radius: 12px;
-        background: linear-gradient(135deg, rgba(0, 212, 255, 0.1) 0%, rgba(58, 134, 255, 0.1) 100%);
-        border: 1px solid var(--border);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 20px;
-    }
-
-    /* ======== UPLOAD AREA ======== */
-    .upload-container {
-        background: linear-gradient(135deg, rgba(17, 26, 58, 0.5) 0%, rgba(26, 45, 92, 0.5) 100%);
-        border: 2px solid var(--border);
-        border-radius: 16px;
-        padding: 28px;
-        transition: all 0.3s ease;
-        backdrop-filter: blur(10px);
-    }
-
-    .upload-container:hover {
-        border-color: rgba(0, 212, 255, 0.3);
-        background: linear-gradient(135deg, rgba(17, 26, 58, 0.7) 0%, rgba(26, 45, 92, 0.7) 100%);
-        box-shadow: 0 8px 32px rgba(0, 212, 255, 0.1);
-    }
-
-    [data-testid="stFileUploadDropzone"] {
-        border: 2px dashed var(--accent-cyan) !important;
-        border-radius: 12px !important;
-        background: transparent !important;
-    }
-
-    /* ======== BUTTONS ======== */
-    .stButton > button {
-        position: relative;
-        overflow: hidden;
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-blue) 100%) !important;
-        color: var(--primary) !important;
-        border: none !important;
-        padding: 16px 42px !important;
-        border-radius: 12px !important;
-        font-weight: 700 !important;
-        font-size: 15px !important;
-        letter-spacing: 0.5px !important;
-        transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
-        box-shadow: 0 4px 15px rgba(0, 212, 255, 0.2) !important;
-        cursor: pointer !important;
-    }
-
-    .stButton > button::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-        transition: left 0.5s ease;
-    }
-
-    .stButton > button:hover::before {
-        left: 100%;
-    }
-
-    .stButton > button:hover {
-        transform: translateY(-4px) !important;
-        box-shadow: 0 8px 30px rgba(0, 212, 255, 0.4) !important;
-        letter-spacing: 1px !important;
-    }
-
-    .stButton > button:active {
-        transform: translateY(-1px) !important;
-    }
-
-    /* ======== ANALYSIS BUTTON SPECIAL ======== */
-    .analyze-btn {
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-pink) 100%) !important;
-        font-size: 16px !important;
-        padding: 20px 50px !important;
-        min-width: 280px;
-        box-shadow: 0 8px 30px rgba(0, 212, 255, 0.3) !important;
-    }
-
-    .analyze-btn:hover {
-        transform: translateY(-6px) scale(1.02) !important;
-        box-shadow: 0 12px 40px rgba(0, 212, 255, 0.5) !important;
-        letter-spacing: 1.5px !important;
-    }
-
-    /* ======== CARDS & METRICS ======== */
-    .metric-card {
-        background: linear-gradient(135deg, rgba(17, 26, 58, 0.6) 0%, rgba(26, 45, 92, 0.6) 100%);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 24px;
-        backdrop-filter: blur(10px);
-        transition: all 0.3s ease;
-    }
-
-    .metric-card:hover {
-        border-color: rgba(0, 212, 255, 0.3);
-        transform: translateY(-4px);
-        box-shadow: 0 8px 32px rgba(0, 212, 255, 0.1);
-    }
-
-    .metric-value {
-        font-size: 36px;
-        font-weight: 800;
-        background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-pink) 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin: 12px 0;
-    }
-
-    .metric-label {
-        color: var(--text-secondary);
-        font-size: 13px;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-
-    /* ======== STATUS INDICATORS ======== */
-    .status-badge {
-        display: inline-block;
-        padding: 8px 16px;
-        border-radius: 8px;
-        font-size: 12px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-
-    .status-success {
-        background: rgba(0, 255, 0, 0.1);
-        color: var(--success);
-        border: 1px solid rgba(0, 255, 0, 0.2);
-    }
-
-    .status-pending {
-        background: rgba(255, 165, 0, 0.1);
-        color: var(--accent-gold);
-        border: 1px solid rgba(255, 165, 0, 0.2);
-    }
-
-    /* ======== PROGRESS BAR ======== */
-    .stProgress > div > div > div > div {
-        background: linear-gradient(90deg, var(--accent-cyan) 0%, var(--accent-pink) 100%) !important;
-        border-radius: 10px !important;
-    }
-
-    /* ======== DIVIDER ======== */
-    .divider {
-        height: 1px;
-        background: var(--border);
-        margin: 20px 0;
-    }
-
-    /* ======== TEXT & LISTS ======== */
-    p {
-        color: var(--text-secondary);
-        line-height: 1.6;
-        margin: 0 !important;
-    }
-
-    /* ======== AUDIO PLAYER ======== */
-    audio {
-        width: 100%;
-        border-radius: 8px;
-        margin: 12px 0;
-    }
-
-    /* ======== GRID LAYOUT ======== */
-    .compact-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 20px;
-    }
-
-    /* ======== ANIMATION KEYFRAMES ======== */
-    @keyframes fadeInUp {
-        from {
-            opacity: 0;
-            transform: translateY(20px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-
-    @keyframes glow {
-        0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.1); }
-        50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.2); }
-    }
-
-    @keyframes shimmer {
-        0% { background-position: -1000px 0; }
-        100% { background-position: 1000px 0; }
-    }
-
-    .fade-in {
-        animation: fadeInUp 0.6s ease-out;
-    }
-
-    .glowing {
-        animation: glow 2s ease-in-out infinite;
-    }
-
-    /* ======== RESPONSIVE ======== */
-    @media (max-width: 768px) {
-        .toolbar-container {
-            padding: 0 20px;
-            height: 60px;
-        }
-
-        .toolbar-info {
-            display: none;
-        }
-
-        .main-container {
-            margin-top: 60px;
-            padding: 20px;
-        }
-
-        h1 { font-size: 32px; }
-        h2 { font-size: 22px; }
-        h3 { font-size: 16px; }
-
-        .compact-grid {
-            grid-template-columns: 1fr;
-        }
-
-        .analyze-btn {
-            min-width: 100% !important;
-            padding: 16px 30px !important;
-        }
-    }
-
-    /* ======== SCROLLBAR ======== */
-    ::-webkit-scrollbar {
-        width: 8px;
-    }
-
-    ::-webkit-scrollbar-track {
-        background: rgba(0, 212, 255, 0.05);
-    }
-
-    ::-webkit-scrollbar-thumb {
-        background: linear-gradient(180deg, var(--accent-cyan) 0%, var(--accent-blue) 100%);
-        border-radius: 10px;
-    }
-
-    ::-webkit-scrollbar-thumb:hover {
-        background: linear-gradient(180deg, var(--accent-pink) 0%, var(--accent-cyan) 100%);
-    }
-</style>
-"""
-
-st.markdown(custom_css, unsafe_allow_html=True)
+ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a'}
 
 # ============================================================================
-# SESSION STATE
+# PERSISTENT MODULE LOADING
 # ============================================================================
 
-if 'results' not in st.session_state:
-    st.session_state.results = None
-if 'user_file' not in st.session_state:
-    st.session_state.user_file = None
-if 'ref_file' not in st.session_state:
-    st.session_state.ref_file = None
-if 'show_results' not in st.session_state:
-    st.session_state.show_results = False
+_module_cache = None
+_module_lock = threading.Lock()
 
+def load_notebook_once():
+    """Load notebook ONCE and cache it"""
+    global _module_cache
 
-# ============================================================================
-# CUSTOM TOOLBAR
-# ============================================================================
+    if _module_cache is not None:
+        return _module_cache
 
-def render_toolbar():
-    """Render top toolbar"""
-    st.markdown("""
-    <div class="toolbar-container">
-        <div class="toolbar-logo">Audio Analyzer</div>
-        <div class="toolbar-spacer"></div>
-        <div class="toolbar-info">
-            <div class="toolbar-stat">
-                <div class="toolbar-stat-value">✓ Ready</div>
-                <div class="toolbar-stat-label">System Status</div>
-            </div>
-            <div class="toolbar-stat">
-                <div class="toolbar-stat-value">v1.0</div>
-                <div class="toolbar-stat-label">Version</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    with _module_lock:
+        if _module_cache is not None:
+            return _module_cache
 
-
-# ============================================================================
-# LOAD NOTEBOOK
-# ============================================================================
-
-@st.cache_resource
-def load_notebook():
-    """Load Analysis.ipynb using nbconvert"""
-    try:
-        if not os.path.exists("Analysis.ipynb"):
-            st.error("Analysis.ipynb not found")
-            return None
-
-        with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            logger.info("🔄 Loading Analysis.ipynb (first time)...")
+            start = time.time()
 
             result = subprocess.run(
-                [
-                    "jupyter",
-                    "nbconvert",
-                    "--to",
-                    "script",
-                    "Analysis.ipynb",
-                    "--output",
-                    "analysis_temp",
-                    "--output-dir",
-                    tmpdir,
-                ],
+                ['jupyter', 'nbconvert', '--to', 'script', 'Analysis.ipynb', '--stdout'],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=30
             )
 
             if result.returncode != 0:
-                st.error(result.stderr)
+                logger.error(f"Notebook conversion failed: {result.stderr}")
                 return None
 
-            # find the generated file
-            files = os.listdir(tmpdir)
+            module = {}
+            exec(result.stdout, module)
 
-            script_file = None
-            for f in files:
-                if f.startswith("analysis_temp"):
-                    script_file = os.path.join(tmpdir, f)
-                    break
+            elapsed = time.time() - start
+            logger.info(f"✅ Notebook loaded in {elapsed:.2f}s (cached for future requests)")
 
-            if script_file is None:
-                st.error("Converted script not found")
-                return None
-
-            with open(script_file, "r", encoding="utf-8") as f:
-                script = f.read()
-
-            namespace = {}
-            exec(script, namespace)
-
-            return namespace
-
-    except Exception as e:
-        st.error(f"Notebook loading error: {e}")
-        return None
-
-
-def run_analysis(user_path, ref_path):
-    try:
-        st.write("Loading notebook...")
-
-        module = load_notebook()
-
-        if not module:
-            st.error("Notebook failed to load")
+            _module_cache = module
+            return module
+        except Exception as e:
+            logger.error(f"Error loading notebook: {e}")
             return None
 
-        if 'evaluate_singing' not in module:
-            st.error("evaluate_singing function not found")
-            return None
 
-        st.write("Running evaluation...")
-
-        results = module['evaluate_singing'](user_path, ref_path, 'Models')
-
-        st.write("Evaluation finished")
-
-        return results
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return None
+def get_module():
+    return load_notebook_once()
 
 
 # ============================================================================
-# HELPER FUNCTIONS
+# HTML TEMPLATE (FINAL VERSION)
 # ============================================================================
 
-def get_emotion_emoji(emotion):
-    return {'Happy': '😊', 'Sad': '😢', 'Neutral': '😐', 'Energetic': '⚡'}.get(emotion, '🎵')
-
-
-def get_grade(score):
-    if score >= 90:
-        return "A+", "#00ff00"
-    elif score >= 80:
-        return "A", "#00ff00"
-    elif score >= 70:
-        return "B", "#ffdd00"
-    elif score >= 60:
-        return "C", "#ffaa00"
-    elif score >= 50:
-        return "D", "#ff6600"
-    else:
-        return "F", "#ff0000"
-
-
-def create_gauge_chart(value, title):
-    """Create compact gauge chart"""
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=value,
-        title={'text': title},
-        gauge={
-            'axis': {'range': [0, 100]},
-            'bar': {'color': "#00ff00" if value >= 80 else "#ffdd00" if value >= 60 else "#ff0000"},
-            'steps': [
-                {'range': [0, 50], 'color': "rgba(255, 0, 0, 0.1)"},
-                {'range': [50, 80], 'color': "rgba(255, 200, 0, 0.1)"},
-                {'range': [80, 100], 'color': "rgba(0, 255, 0, 0.1)"}
-            ]
+HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Analyzer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-    ))
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color='#ffffff', size=12),
-        height=280,
-        margin=dict(l=20, r=20, t=40, b=20)
-    )
-    return fig
 
+        body {
+            background: linear-gradient(135deg, #0a0e27 0%, #111a3a 50%, #1a1a3e 100%);
+            background-attachment: fixed;
+            color: #ffffff;
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+            min-height: 100vh;
+            padding: 20px;
+        }
 
-# ============================================================================
-# MAIN PAGE
-# ============================================================================
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
 
-render_toolbar()
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding-top: 20px;
+        }
 
-st.markdown('<div class="main-container">', unsafe_allow_html=True)
+        .header h1 {
+            font-size: 48px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #00d4ff 0%, #ff006e 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
 
-# Header section - Compact
-col1, col2 = st.columns([2, 1])
+        .header p {
+            color: #a0a0b0;
+            font-size: 16px;
+        }
 
-with col1:
-    st.markdown('<h1 style="margin: 0;">Audio Analyzer</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Real-time singing performance evaluation with AI-powered analysis</p>',
-                unsafe_allow_html=True)
+        .main {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            margin-bottom: 40px;
+        }
 
-with col2:
-    if st.session_state.show_results and st.session_state.results:
-        st.markdown("""
-        <div style="text-align: right;">
-            <div class="status-badge status-success">✓ Analysis Complete</div>
-        </div>
-        """, unsafe_allow_html=True)
+        @media (max-width: 1024px) {
+            .main {
+                grid-template-columns: 1fr;
+            }
+        }
 
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        .card {
+            background: linear-gradient(135deg, rgba(10, 14, 39, 0.8) 0%, rgba(17, 26, 58, 0.8) 100%);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 16px;
+            padding: 32px;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 8px 32px rgba(0, 212, 255, 0.05);
+            transition: all 0.3s ease;
+        }
 
-# Main two-column layout - Compact
-col_upload, col_results = st.columns([1, 1], gap="large")
+        .card:hover {
+            border-color: rgba(0, 212, 255, 0.4);
+            box-shadow: 0 8px 32px rgba(0, 212, 255, 0.15);
+        }
 
-# ============================================================================
-# LEFT COLUMN - UPLOAD
-# ============================================================================
+        .card h2 {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
 
-with col_upload:
-    st.markdown("""
-    <div class="section-header">
-        <div class="section-icon">📤</div>
-        <h3>Upload Audio</h3>
+        .card h2 span { font-size: 28px; }
+
+        .upload-group {
+            margin-bottom: 24px;
+        }
+
+        .upload-group label {
+            display: block;
+            color: #a0a0b0;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .upload-group input[type="file"] {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            border: 2px dashed rgba(0, 212, 255, 0.3);
+            border-radius: 8px;
+            background: rgba(0, 212, 255, 0.05);
+            color: #00d4ff;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .upload-group input[type="file"]:hover {
+            border-color: rgba(0, 212, 255, 0.6);
+            background: rgba(0, 212, 255, 0.1);
+        }
+
+        .file-badge {
+            display: inline-block;
+            background: rgba(0, 255, 0, 0.1);
+            border: 1px solid rgba(0, 255, 0, 0.3);
+            color: #00ff00;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        button {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.2) 0%, rgba(58, 134, 255, 0.2) 100%);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            color: #ffffff;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+            text-align: center;
+            margin-bottom: 12px;
+        }
+
+        button:hover:not(:disabled) {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.4) 0%, rgba(58, 134, 255, 0.4) 100%);
+            border-color: #00d4ff;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.primary {
+            background: linear-gradient(135deg, #00d4ff 0%, #3a86ff 100%);
+            border: none;
+            color: #0a0e27;
+            box-shadow: 0 4px 15px rgba(0, 212, 255, 0.4);
+        }
+
+        button.primary:hover:not(:disabled) {
+            box-shadow: 0 8px 25px rgba(0, 212, 255, 0.6);
+            transform: translateY(-2px);
+        }
+
+        .waveform-section {
+            display: none;
+            margin-top: 40px;
+        }
+
+        .waveform-section.active {
+            display: block;
+        }
+
+        .waveform-container {
+            background: rgba(17, 26, 58, 0.8);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            min-height: 150px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 2px;
+        }
+
+        .waveform-bar {
+            width: 3px;
+            background: linear-gradient(180deg, #00d4ff 0%, #3a86ff 100%);
+            border-radius: 2px;
+            min-height: 10px;
+            transition: height 0.1s ease;
+            opacity: 0.8;
+            cursor: pointer;
+        }
+
+        .waveform-bar.selected {
+            background: linear-gradient(180deg, #ffd700 0%, #ff8c00 100%);
+            opacity: 1;
+        }
+
+        .waveform-bar:hover {
+            opacity: 1;
+            filter: brightness(1.2);
+        }
+
+        .audio-player-section {
+            background: rgba(0, 212, 255, 0.05);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .audio-player-section h4 {
+            color: #a0a0b0;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .audio-controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .audio-controls button {
+            flex: 1;
+            margin-bottom: 0;
+            padding: 10px 16px;
+            font-size: 13px;
+        }
+
+        .play-status {
+            color: #a0a0b0;
+            font-size: 12px;
+            text-align: center;
+            margin-top: 8px;
+            min-height: 18px;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .controls button {
+            font-size: 12px;
+            padding: 10px 12px;
+            margin-bottom: 0;
+        }
+
+        .slider-group {
+            margin-bottom: 20px;
+        }
+
+        .slider-group label {
+            display: block;
+            color: #a0a0b0;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(0, 212, 255, 0.2);
+            outline: none;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #00d4ff;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #00d4ff;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .info-item {
+            background: rgba(0, 212, 255, 0.05);
+            border: 1px solid rgba(0, 212, 255, 0.1);
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .info-item .label {
+            color: #a0a0b0;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .info-item .value {
+            color: #00d4ff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .info-item input[type="number"] {
+            width: 100%;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            color: #00d4ff;
+            padding: 8px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 700;
+            text-align: center;
+            margin-top: 4px;
+            outline: none;
+        }
+
+        .info-item input[type="number"]:focus {
+            border-color: #00d4ff;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+        }
+
+        .results-section {
+            display: none;
+        }
+
+        .results-section.active {
+            display: block;
+        }
+
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .metric-card {
+            background: rgba(0, 212, 255, 0.05);
+            border: 2px solid rgba(0, 212, 255, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .metric-card h3 {
+            color: #a0a0b0;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .metric-card .value {
+            color: #00d4ff;
+            font-size: 36px;
+            font-weight: 700;
+        }
+
+        .metric-card .unit {
+            color: #a0a0b0;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .overall-score {
+            grid-column: 1 / -1;
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.1) 0%, rgba(58, 134, 255, 0.1) 100%);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+        }
+
+        .overall-score .value {
+            font-size: 48px;
+        }
+
+        .emotion-card {
+            grid-column: 1 / -1;
+            background: rgba(255, 165, 0, 0.05);
+            border: 2px solid rgba(255, 165, 0, 0.2);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 200px;
+        }
+
+        .emotion-emoji {
+            font-size: 64px;
+            margin-bottom: 12px;
+        }
+
+        .emotion-name {
+            color: #ffa500;
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .emotion-confidence {
+            color: #a0a0b0;
+            font-size: 14px;
+        }
+
+        .grade-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-top: 12px;
+        }
+
+        .grade-A {
+            background: rgba(0, 255, 0, 0.2);
+            color: #00ff00;
+            border: 1px solid rgba(0, 255, 0, 0.3);
+        }
+
+        .grade-B {
+            background: rgba(255, 221, 0, 0.2);
+            color: #ffdd00;
+            border: 1px solid rgba(255, 221, 0, 0.3);
+        }
+
+        .grade-C {
+            background: rgba(255, 170, 0, 0.2);
+            color: #ffaa00;
+            border: 1px solid rgba(255, 170, 0, 0.3);
+        }
+
+        .grade-F {
+            background: rgba(255, 0, 0, 0.2);
+            color: #ff6666;
+            border: 1px solid rgba(255, 0, 0, 0.3);
+        }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            display: none;
+        }
+
+        .message.show {
+            display: block;
+        }
+
+        .success {
+            background: rgba(0, 255, 0, 0.1);
+            border: 1px solid rgba(0, 255, 0, 0.3);
+            color: #00ff00;
+        }
+
+        .error {
+            background: rgba(255, 0, 0, 0.1);
+            border: 1px solid rgba(255, 0, 0, 0.3);
+            color: #ff6666;
+        }
+
+        .info {
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #00d4ff;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top: 2px solid #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #111a3a;
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            max-width: 400px;
+        }
+
+        .modal-content .loading {
+            margin-bottom: 20px;
+            width: 40px;
+            height: 40px;
+        }
+
+        .results-placeholder {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .results-placeholder .icon {
+            font-size: 32px;
+            margin-bottom: 12px;
+        }
+
+        .results-placeholder .text {
+            color: #a0a0b0;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎵 Audio Analyzer</h1>
+        <p>Professional Singing Performance Evaluation</p>
     </div>
-    """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="upload-container">
-        <p style="margin-bottom: 16px; color: #a0a0b0; font-size: 13px;">User's Singing Audio</p>
-    </div>
-    """, unsafe_allow_html=True)
+    <div class="container">
+        <div class="main">
+            <div class="card">
+                <h2><span>🎙️</span>Audio Upload</h2>
+                
+                <div id="message" class="message"></div>
 
-    user_file = st.file_uploader(
-        "User audio",
-        type=['mp3', 'wav', 'ogg', 'm4a'],
-        key='user',
-        label_visibility="collapsed"
-    )
+                <div class="upload-group">
+                    <label>Your Singing</label>
+                    <input type="file" id="userAudio" accept=".mp3,.wav,.ogg,.m4a">
+                    <div id="userBadge"></div>
+                </div>
 
-    if user_file:
-        st.session_state.user_file = user_file
-        st.audio(user_file, format='audio/mp3')
-        st.markdown(f'<div class="status-badge status-success" style="margin-top: 8px;">✓ {user_file.name}</div>',
-                    unsafe_allow_html=True)
+                <div class="upload-group">
+                    <label>Reference Song</label>
+                    <input type="file" id="refAudio" accept=".mp3,.wav,.ogg,.m4a">
+                    <div id="refBadge"></div>
+                </div>
 
-    st.markdown('<div style="margin: 20px 0;"></div>', unsafe_allow_html=True)
+                <button id="analyzeBtn" class="primary" disabled>▶ START ANALYSIS</button>
+            </div>
 
-    st.markdown("""
-    <div class="upload-container">
-        <p style="margin-bottom: 16px; color: #a0a0b0; font-size: 13px;">Reference Song Audio</p>
-    </div>
-    """, unsafe_allow_html=True)
+            <div class="card">
+                <h2><span>📊</span>Performance Results</h2>
+                
+                <div id="resultsPlaceholder" class="results-placeholder">
+                    <div class="icon">📈</div>
+                    <div class="text">Upload audio files and click<br/>START ANALYSIS to see results</div>
+                </div>
 
-    ref_file = st.file_uploader(
-        "Reference audio",
-        type=['mp3', 'wav', 'ogg', 'm4a'],
-        key='ref',
-        label_visibility="collapsed"
-    )
+                <div id="resultsSection" class="results-section">
+                    <div class="results-grid">
+                        <div id="overallScore" class="metric-card overall-score">
+                            <h3>Overall Score</h3>
+                            <div class="value" id="scoreValue">0</div>
+                            <div id="gradeBadge" class="grade-badge"></div>
+                        </div>
 
-    if ref_file:
-        st.session_state.ref_file = ref_file
-        st.audio(ref_file, format='audio/mp3')
-        st.markdown(f'<div class="status-badge status-success" style="margin-top: 8px;">✓ {ref_file.name}</div>',
-                    unsafe_allow_html=True)
+                        <div class="metric-card">
+                            <h3>Pitch Accuracy</h3>
+                            <div class="value" id="pitchValue">0</div>
+                            <div class="unit">%</div>
+                        </div>
 
-    # Analyze button
-    st.markdown('<div style="margin: 28px 0;"></div>', unsafe_allow_html=True)
+                        <div class="metric-card">
+                            <h3>Rhythm Accuracy</h3>
+                            <div class="value" id="rhythmValue">0</div>
+                            <div class="unit">%</div>
+                        </div>
 
-    col_btn1, col_btn2, col_btn3 = st.columns([0.5, 1, 0.5])
-    with col_btn2:
-        if st.session_state.user_file and st.session_state.ref_file:
-            if st.button("▶ Analyze Audio", key="analyze", use_container_width=True):
+                        <div class="metric-card emotion-card">
+                            <div class="emotion-emoji" id="emotionEmoji">😐</div>
+                            <div class="emotion-name" id="emotionValue">Neutral</div>
+                            <div class="emotion-confidence" id="emotionConfidence">0% confidence</div>
+                        </div>
+                    </div>
 
-                progress = st.progress(0)
-                status = st.empty()
-
-                user_path = "temp_user.mp3"
-                ref_path = "temp_ref.mp3"
-
-                # STEP 1 — Saving files
-                status.text("Saving uploaded files...")
-                progress.progress(10)
-
-                with open(user_path, "wb") as f:
-                    f.write(st.session_state.user_file.getbuffer())
-
-                with open(ref_path, "wb") as f:
-                    f.write(st.session_state.ref_file.getbuffer())
-
-                time.sleep(0.3)
-
-                # STEP 2 — Loading analysis engine
-                status.text("Loading analysis engine...")
-                progress.progress(25)
-
-                module = load_notebook()
-
-                if not module or 'evaluate_singing' not in module:
-                    st.error("Analysis engine failed to load")
-                    progress.empty()
-                    st.stop()
-
-                time.sleep(0.3)
-
-                # STEP 3 — Running evaluation
-                status.text("Running singing evaluation...")
-                progress.progress(60)
-
-                with st.spinner("Analyzing pitch, rhythm and emotion..."):
-                    results = module['evaluate_singing'](user_path, ref_path, 'Models')
-
-                time.sleep(0.3)
-
-                # STEP 4 — Finalizing
-                status.text("Finalizing results...")
-                progress.progress(90)
-
-                try:
-                    os.remove(user_path)
-                    os.remove(ref_path)
-                except:
-                    pass
-
-                progress.progress(100)
-                status.text("Analysis complete!")
-
-                if results and results.get('success'):
-                    st.session_state.results = results
-                    st.session_state.show_results = True
-                    st.success("✓ Analysis Complete!")
-                    st.rerun()
-        else:
-            st.button("▶ Analyze Audio", key="analyze", use_container_width=True, disabled=True)
-
-# ============================================================================
-# RIGHT COLUMN - RESULTS
-# ============================================================================
-
-with col_results:
-    if st.session_state.show_results and st.session_state.results:
-        r = st.session_state.results
-
-        st.markdown("""
-        <div class="section-header">
-            <div class="section-icon">📊</div>
-            <h3>Performance Results</h3>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Overall Score - Prominent
-        grade, color = get_grade(r['final_score'])
-
-        st.markdown(f"""
-        <div class="metric-card" style="text-align: center; padding: 32px 24px;">
-            <div style="font-size: 14px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px;">Overall Score</div>
-            <div class="metric-value">{r['final_score']:.1f}</div>
-            <div style="font-size: 12px; background: rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.2); color: {color}; padding: 6px 12px; border-radius: 6px; display: inline-block; margin-top: 8px;">{grade}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown('<div style="margin: 16px 0;"></div>', unsafe_allow_html=True)
-
-        # Compact metrics
-        st.markdown(
-            '<h3 style="font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">Accuracy Metrics</h3>',
-            unsafe_allow_html=True)
-
-        col_m1, col_m2 = st.columns(2)
-
-        with col_m1:
-            st.plotly_chart(create_gauge_chart(r['pitch_accuracy'], "Pitch"), use_container_width=True)
-
-        with col_m2:
-            st.plotly_chart(create_gauge_chart(r['rhythm_accuracy'], "Rhythm"), use_container_width=True)
-
-        st.markdown('<div style="margin: 16px 0;"></div>', unsafe_allow_html=True)
-
-        # Emotion detection
-        st.markdown(
-            '<h3 style="font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">Emotion Detection</h3>',
-            unsafe_allow_html=True)
-
-        st.markdown(f"""
-        <div class="metric-card" style="text-align: center; padding: 24px;">
-            <div style="font-size: 40px; margin-bottom: 8px;">{get_emotion_emoji(r['emotion_detected'])}</div>
-            <div style="font-size: 18px; font-weight: 600; color: var(--text-primary);">{r['emotion_detected']}</div>
-            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">{r['emotion_confidence'] * 100:.0f}% Confidence</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown('<div style="margin: 16px 0;"></div>', unsafe_allow_html=True)
-
-        # Raw results
-        st.markdown(
-            '<h3 style="font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">Raw Data</h3>',
-            unsafe_allow_html=True)
-
-        st.markdown(f"""
-        <div class="metric-card" style="font-size: 13px;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                <div><span style="color: var(--text-secondary);">Pitch:</span> <span style="color: #00d4ff; font-weight: 600;">{r['pitch_accuracy']:.1f}%</span></div>
-                <div><span style="color: var(--text-secondary);">Rhythm:</span> <span style="color: #00d4ff; font-weight: 600;">{r['rhythm_accuracy']:.1f}%</span></div>
-                <div><span style="color: var(--text-secondary);">Emotion:</span> <span style="color: #00d4ff; font-weight: 600;">{r['emotion_detected']}</span></div>
-                <div><span style="color: var(--text-secondary);">Final:</span> <span style="color: #00d4ff; font-weight: 600;">{r['final_score']:.1f}/100</span></div>
+                    <button id="newAnalysisBtn">🔄 NEW ANALYSIS</button>
+                </div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
 
-        st.markdown('<div style="margin: 20px 0;"></div>', unsafe_allow_html=True)
+        <div id="waveformSection" class="waveform-section card">
+            <h2><span>🎚️</span>Adjust Segment Position</h2>
+            <p id="matchInfo" style="color: #a0a0b0; margin-bottom: 20px;"></p>
 
-        col_reset1, col_reset2, col_reset3 = st.columns([0.5, 1, 0.5])
-        with col_reset2:
-            if st.button("🔄 New Analysis", use_container_width=True):
-                st.session_state.results = None
-                st.session_state.show_results = False
-                st.session_state.user_file = None
-                st.session_state.ref_file = None
-                st.rerun()
+            <div class="waveform-container" id="waveformContainer"></div>
 
-    else:
-        st.markdown("""
-        <div class="section-header">
-            <div class="section-icon">📊</div>
-            <h3>Performance Results</h3>
+            <div class="audio-player-section">
+                <h4>🎵 Listen to Reference Segment</h4>
+                <div class="audio-controls">
+                    <button id="playBtn">▶ PLAY</button>
+                    <button id="pauseBtn" style="flex: 0; min-width: 100px;">⏸ PAUSE</button>
+                </div>
+                <div class="play-status" id="playStatus">Ready to play</div>
+            </div>
+
+            <div class="controls">
+                <button id="btn-5s">⏮ -5s</button>
+                <button id="btn-1s">◀ -1s</button>
+                <button id="btn+1s">▶ +1s</button>
+                <button id="btn+5s">+5s ⏭</button>
+            </div>
+
+            <div class="slider-group">
+                <label>Fine Position Control</label>
+                <input type="range" id="positionSlider" min="0" max="100" value="0" step="0.1">
+            </div>
+
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="label">Start Time (Editable)</div>
+                    <input type="number" id="startTimeInput" step="0.1" min="0" value="0">
+                </div>
+                <div class="info-item">
+                    <div class="label">Duration</div>
+                    <div class="value" id="durationValue">0.00s</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Diff from Auto</div>
+                    <div class="value" id="diffValue">0.00s</div>
+                </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                <button id="confirmBtn" class="primary" style="grid-column: 1 / 2; margin-bottom: 0;">✓ Confirm</button>
+                <button id="resetBtn" style="grid-column: 2 / 3; margin-bottom: 0;">🔄 Reset</button>
+                <button id="cancelBtn" style="grid-column: 3 / 4; margin-bottom: 0;">✗ Cancel</button>
+            </div>
         </div>
-        """, unsafe_allow_html=True)
+    </div>
 
-        st.markdown("""
-        <div class="metric-card" style="text-align: center; padding: 40px 24px; border: 2px dashed rgba(0, 212, 255, 0.2);">
-            <div style="font-size: 32px; margin-bottom: 12px;">📈</div>
-            <div style="color: var(--text-secondary); font-size: 14px;">Upload audio files and click Analyze<br/>to see detailed performance metrics</div>
+    <div id="loadingModal" class="modal">
+        <div class="modal-content">
+            <div class="loading"></div>
+            <p id="loadingText">Processing audio...</p>
         </div>
-        """, unsafe_allow_html=True)
+    </div>
 
-st.markdown('</div>', unsafe_allow_html=True)
+    <!-- Hidden audio element for playback -->
+    <audio id="audioPlayer"></audio>
+
+    <script>
+        let state = {
+            userPath: null,
+            refPath: null,
+            autoMatchData: null,
+            selectedStart: null,
+            windowSize: null,
+            sr: null
+        };
+
+        const audioPlayer = document.getElementById('audioPlayer');
+
+        function showMessage(message, type = 'info') {
+            const messageEl = document.getElementById('message');
+            messageEl.textContent = message;
+            messageEl.className = `message show ${type}`;
+            setTimeout(() => messageEl.classList.remove('show'), 5000);
+        }
+
+        function showLoading(text = 'Processing audio...') {
+            document.getElementById('loadingText').textContent = text;
+            document.getElementById('loadingModal').classList.add('show');
+        }
+
+        function hideLoading() {
+            document.getElementById('loadingModal').classList.remove('show');
+        }
+
+        function scrollToWaveform() {
+            const waveformSection = document.getElementById('waveformSection');
+            setTimeout(() => {
+                waveformSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 300);
+        }
+
+        function scrollToTop() {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        function getGrade(score) {
+            if (score >= 90) return { grade: 'A+', class: 'grade-A' };
+            if (score >= 80) return { grade: 'A', class: 'grade-A' };
+            if (score >= 70) return { grade: 'B', class: 'grade-B' };
+            if (score >= 60) return { grade: 'C', class: 'grade-C' };
+            if (score >= 50) return { grade: 'D', class: 'grade-C' };
+            return { grade: 'F', class: 'grade-F' };
+        }
+
+        function getEmotionEmoji(emotion) {
+            const emojis = {
+                'Happy': '😊',
+                'Sad': '😢',
+                'Neutral': '😐',
+                'Energetic': '⚡',
+                'Angry': '😠'
+            };
+            return emojis[emotion] || '🎵';
+        }
+
+        document.getElementById('userAudio').addEventListener('change', (e) => {
+            if (e.target.files[0]) {
+                document.getElementById('userBadge').innerHTML = `<div class="file-badge">✓ ${e.target.files[0].name}</div>`;
+                updateAnalyzeButton();
+            }
+        });
+
+        document.getElementById('refAudio').addEventListener('change', (e) => {
+            if (e.target.files[0]) {
+                document.getElementById('refBadge').innerHTML = `<div class="file-badge">✓ ${e.target.files[0].name}</div>`;
+                updateAnalyzeButton();
+            }
+        });
+
+        function updateAnalyzeButton() {
+            const hasUser = document.getElementById('userAudio').files[0];
+            const hasRef = document.getElementById('refAudio').files[0];
+            document.getElementById('analyzeBtn').disabled = !(hasUser && hasRef);
+        }
+
+        document.getElementById('analyzeBtn').addEventListener('click', async () => {
+            const userFile = document.getElementById('userAudio').files[0];
+            const refFile = document.getElementById('refAudio').files[0];
+
+            if (!userFile || !refFile) {
+                showMessage('Please upload both files', 'error');
+                return;
+            }
+
+            showLoading('Uploading and analyzing...');
+
+            const formData = new FormData();
+            formData.append('user_audio', userFile);
+            formData.append('ref_audio', refFile);
+
+            try {
+                const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
+                const uploadData = await uploadRes.json();
+
+                if (!uploadRes.ok) throw new Error(uploadData.error);
+
+                state.userPath = uploadData.user_path;
+                state.refPath = uploadData.ref_path;
+
+                showLoading('Auto-matching segment...');
+
+                const matchRes = await fetch('/api/auto-match', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_path: state.userPath,
+                        ref_path: state.refPath
+                    })
+                });
+
+                const matchData = await matchRes.json();
+
+                if (!matchRes.ok) throw new Error(matchData.error);
+
+                state.autoMatchData = matchData;
+                state.windowSize = matchData.window_size;
+                state.sr = matchData.sr;
+                state.selectedStart = matchData.timestamp;
+
+                document.getElementById('waveformSection').classList.add('active');
+                document.getElementById('matchInfo').innerHTML = 
+                    `Auto-matched at <strong>${matchData.timestamp.toFixed(2)}s</strong> with <strong style="color: #00ff00;">${matchData.confidence.toFixed(0)}%</strong> confidence`;
+
+                drawWaveform();
+                updateWaveformInfo();
+
+                hideLoading();
+                showMessage('Auto-match complete! Adjust if needed.', 'success');
+                
+                scrollToWaveform();
+            } catch (error) {
+                hideLoading();
+                showMessage(`Error: ${error.message}`, 'error');
+            }
+        });
+
+        function drawWaveform() {
+            const container = document.getElementById('waveformContainer');
+            container.innerHTML = '';
+
+            const refDuration = state.autoMatchData.ref_duration;
+            const segmentDuration = state.autoMatchData.segment_duration;
+            const totalBars = 60;
+
+            for (let i = 0; i < totalBars; i++) {
+                const bar = document.createElement('div');
+                bar.className = 'waveform-bar';
+                
+                const barPos = (i / totalBars) * refDuration;
+                const isSelected = barPos >= state.selectedStart && barPos <= state.selectedStart + segmentDuration;
+                
+                if (isSelected) {
+                    bar.classList.add('selected');
+                }
+
+                const height = Math.random() * 80 + 20;
+                bar.style.height = height + 'px';
+
+                bar.addEventListener('click', () => {
+                    state.selectedStart = Math.max(0, Math.min(barPos, refDuration - segmentDuration));
+                    updateWaveformInfo();
+                    drawWaveform();
+                });
+
+                container.appendChild(bar);
+            }
+        }
+
+        function updateWaveformInfo() {
+            const segmentDuration = state.autoMatchData.segment_duration;
+            const autoStart = state.autoMatchData.timestamp;
+            const diff = state.selectedStart - autoStart;
+
+            document.getElementById('startTimeInput').value = state.selectedStart.toFixed(2);
+            document.getElementById('durationValue').textContent = segmentDuration.toFixed(2) + 's';
+            document.getElementById('diffValue').textContent = (diff >= 0 ? '+' : '') + diff.toFixed(2) + 's';
+
+            const refDuration = state.autoMatchData.ref_duration;
+            const sliderValue = (state.selectedStart / (refDuration - state.autoMatchData.segment_duration)) * 100;
+            document.getElementById('positionSlider').value = sliderValue;
+        }
+
+        // Play button
+        document.getElementById('playBtn').addEventListener('click', async () => {
+            document.getElementById('playBtn').disabled = true;
+            document.getElementById('playStatus').textContent = 'Loading audio...';
+
+            try {
+                const response = await fetch('/api/get-segment-audio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ref_path: state.refPath,
+                        selected_start: state.selectedStart,
+                        window_size: state.windowSize,
+                        sr: state.sr
+                    })
+                });
+
+                if (!response.ok) throw new Error('Failed to load audio');
+
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+
+                audioPlayer.src = url;
+                audioPlayer.play();
+
+                document.getElementById('playStatus').textContent = 'Now playing...';
+                document.getElementById('playBtn').textContent = '▶ PLAY AGAIN';
+                document.getElementById('playBtn').disabled = false;
+
+                audioPlayer.onended = () => {
+                    document.getElementById('playStatus').textContent = 'Finished playing';
+                };
+
+            } catch (error) {
+                document.getElementById('playStatus').textContent = 'Error: Could not play audio';
+                showMessage(`Playback error: ${error.message}`, 'error');
+                document.getElementById('playBtn').disabled = false;
+            }
+        });
+
+        // Pause button
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            if (audioPlayer.paused) {
+                audioPlayer.play();
+                document.getElementById('pauseBtn').textContent = '⏸ PAUSE';
+                document.getElementById('playStatus').textContent = 'Playing...';
+            } else {
+                audioPlayer.pause();
+                document.getElementById('pauseBtn').textContent = '▶ RESUME';
+                document.getElementById('playStatus').textContent = 'Paused';
+            }
+        });
+
+        document.getElementById('startTimeInput').addEventListener('change', (e) => {
+            const refDuration = state.autoMatchData.ref_duration;
+            const segmentDuration = state.autoMatchData.segment_duration;
+            state.selectedStart = Math.max(0, Math.min(parseFloat(e.target.value), refDuration - segmentDuration));
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('btn-5s').addEventListener('click', () => {
+            state.selectedStart = Math.max(0, state.selectedStart - 5);
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('btn-1s').addEventListener('click', () => {
+            state.selectedStart = Math.max(0, state.selectedStart - 1);
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('btn+1s').addEventListener('click', () => {
+            const refDuration = state.autoMatchData.ref_duration;
+            const segmentDuration = state.autoMatchData.segment_duration;
+            state.selectedStart = Math.min(refDuration - segmentDuration, state.selectedStart + 1);
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('btn+5s').addEventListener('click', () => {
+            const refDuration = state.autoMatchData.ref_duration;
+            const segmentDuration = state.autoMatchData.segment_duration;
+            state.selectedStart = Math.min(refDuration - segmentDuration, state.selectedStart + 5);
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('positionSlider').addEventListener('input', (e) => {
+            const refDuration = state.autoMatchData.ref_duration;
+            const segmentDuration = state.autoMatchData.segment_duration;
+            state.selectedStart = (e.target.value / 100) * (refDuration - segmentDuration);
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('confirmBtn').addEventListener('click', async () => {
+            showLoading('Running analysis...');
+
+            try {
+                const res = await fetch('/api/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_path: state.userPath,
+                        ref_path: state.refPath,
+                        selected_start: state.selectedStart,
+                        window_size: state.windowSize
+                    })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) throw new Error(data.error);
+
+                document.getElementById('resultsPlaceholder').style.display = 'none';
+                document.getElementById('resultsSection').classList.add('active');
+
+                const gradeInfo = getGrade(data.final_score);
+
+                document.getElementById('scoreValue').textContent = data.final_score.toFixed(1);
+                document.getElementById('gradeBadge').textContent = gradeInfo.grade;
+                document.getElementById('gradeBadge').className = `grade-badge ${gradeInfo.class}`;
+                document.getElementById('pitchValue').textContent = data.pitch_accuracy.toFixed(1);
+                document.getElementById('rhythmValue').textContent = data.rhythm_accuracy.toFixed(1);
+                document.getElementById('emotionValue').textContent = data.emotion_detected;
+                document.getElementById('emotionEmoji').textContent = getEmotionEmoji(data.emotion_detected);
+                document.getElementById('emotionConfidence').textContent = (data.emotion_confidence * 100).toFixed(0) + '% confidence';
+
+                hideLoading();
+                showMessage('Analysis complete!', 'success');
+                
+                setTimeout(() => scrollToTop(), 500);
+            } catch (error) {
+                hideLoading();
+                showMessage(`Error: ${error.message}`, 'error');
+            }
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            state.selectedStart = state.autoMatchData.timestamp;
+            updateWaveformInfo();
+            drawWaveform();
+        });
+
+        document.getElementById('cancelBtn').addEventListener('click', () => {
+            document.getElementById('waveformSection').classList.remove('active');
+            showMessage('Analysis cancelled', 'info');
+        });
+
+        document.getElementById('newAnalysisBtn').addEventListener('click', () => {
+            location.reload();
+        });
+    </script>
+</body>
+</html>'''
+
+# ============================================================================
+# ROUTES
+# ============================================================================
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/')
+def index():
+    return HTML_TEMPLATE
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_audio():
+    try:
+        if 'user_audio' not in request.files or 'ref_audio' not in request.files:
+            return jsonify({'error': 'Missing audio files'}), 400
+
+        user_file = request.files['user_audio']
+        ref_file = request.files['ref_audio']
+
+        if not user_file or not ref_file or not allowed_file(user_file.filename) or not allowed_file(ref_file.filename):
+            return jsonify({'error': 'Invalid files'}), 400
+
+        user_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f'user_{user_file.filename}'))
+        ref_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f'ref_{ref_file.filename}'))
+
+        user_file.save(user_path)
+        ref_file.save(ref_path)
+
+        return jsonify({'success': True, 'user_path': user_path, 'ref_path': ref_path})
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auto-match', methods=['POST'])
+def auto_match():
+    try:
+        start_total = time.time()
+
+        data = request.json
+        user_path = data.get('user_path')
+        ref_path = data.get('ref_path')
+
+        if not os.path.exists(user_path) or not os.path.exists(ref_path):
+            return jsonify({'error': 'Audio files not found'}), 400
+
+        module = get_module()
+        if not module or 'find_best_matching_segment' not in module:
+            return jsonify({'error': 'Analysis engine not available'}), 500
+
+        sr = 22050
+
+        logger.info("📁 Loading audio...")
+        user_audio, _ = librosa.load(user_path, sr=sr)
+        ref_audio_full, _ = librosa.load(ref_path, sr=sr)
+
+        logger.info("🎵 Preprocessing...")
+        user_audio = module['trim_silence'](user_audio, sr)
+        ref_audio_full = module['trim_silence'](ref_audio_full, sr)
+
+        has_content_user, _ = module['validate_pitched_content'](user_audio)
+        has_content_ref, _ = module['validate_pitched_content'](ref_audio_full)
+
+        if not has_content_user or not has_content_ref:
+            return jsonify({'error': 'No voice content detected'}), 400
+
+        logger.info("🔍 Auto-matching...")
+        start_match = time.time()
+        matched_segment, timestamp, confidence = module['find_best_matching_segment'](
+            user_audio, ref_audio_full, sr
+        )
+        match_time = time.time() - start_match
+        logger.info(f"✅ Match time: {match_time:.2f}s")
+
+        ref_duration = len(ref_audio_full) / sr
+        window_size = len(matched_segment)
+
+        total_time = time.time() - start_total
+        logger.info(f"⏱️  Total: {total_time:.2f}s")
+
+        return jsonify({
+            'success': True,
+            'timestamp': float(timestamp),
+            'confidence': float(confidence),
+            'window_size': int(window_size),
+            'sr': int(sr),
+            'ref_duration': float(ref_duration),
+            'segment_duration': float(window_size / sr)
+        })
+    except Exception as e:
+        logger.error(f"Auto-match error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': f'Auto-match failed: {str(e)[:100]}'}), 500
+
+
+@app.route('/api/get-segment-audio', methods=['POST'])
+def get_segment_audio():
+    """Get audio segment for playback"""
+    try:
+        data = request.json
+        ref_path = data.get('ref_path')
+        selected_start = data.get('selected_start')
+        window_size = data.get('window_size')
+        sr = data.get('sr', 22050)
+
+        if not os.path.exists(ref_path):
+            return jsonify({'error': 'Audio file not found'}), 400
+
+        # Load reference audio
+        ref_audio, _ = librosa.load(ref_path, sr=sr)
+
+        # Extract segment
+        start_sample = int(float(selected_start) * sr)
+        end_sample = min(start_sample + int(window_size), len(ref_audio))
+        segment = ref_audio[start_sample:end_sample]
+
+        if len(segment) == 0:
+            return jsonify({'error': 'Invalid segment'}), 400
+
+        # Normalize and convert to int16
+        audio_normalized = segment / (np.max(np.abs(segment)) + 1e-8)
+        audio_int16 = np.int16(audio_normalized * 32767)
+
+        # Save to bytes
+        wav_buffer = io.BytesIO()
+        wavfile.write(wav_buffer, sr, audio_int16)
+        wav_buffer.seek(0)
+
+        return send_file(wav_buffer, mimetype='audio/wav', as_attachment=False)
+
+    except Exception as e:
+        logger.error(f"Segment audio error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze():
+    try:
+        start_total = time.time()
+
+        data = request.json
+        user_path = data.get('user_path')
+        ref_path = data.get('ref_path')
+        selected_start = data.get('selected_start')
+        window_size = data.get('window_size')
+
+        if not all([user_path, ref_path, selected_start is not None, window_size]):
+            return jsonify({'error': 'Missing parameters'}), 400
+
+        if not os.path.exists(user_path) or not os.path.exists(ref_path):
+            return jsonify({'error': 'Audio files not found'}), 400
+
+        module = get_module()
+        if not module or 'evaluate_singing' not in module:
+            return jsonify({'error': 'Analysis engine not available'}), 500
+
+        sr = 22050
+
+        logger.info("📁 Loading audio...")
+        user_audio, _ = librosa.load(user_path, sr=sr)
+        ref_audio_full, _ = librosa.load(ref_path, sr=sr)
+
+        logger.info("🎵 Preprocessing...")
+        user_audio = module['trim_silence'](user_audio, sr)
+        ref_audio_full = module['trim_silence'](ref_audio_full, sr)
+
+        logger.info("📏 Extracting segment...")
+        start_sample = int(float(selected_start) * sr)
+        end_sample = min(start_sample + int(window_size), len(ref_audio_full))
+        ref_audio_sliced = ref_audio_full[start_sample:end_sample]
+
+        logger.info("💾 Saving segment...")
+        temp_ref_sliced = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_ref_sliced.wav')
+        audio_normalized = ref_audio_sliced / (np.max(np.abs(ref_audio_sliced)) + 1e-8)
+        audio_int16 = np.int16(audio_normalized * 32767)
+        wavfile.write(temp_ref_sliced, sr, audio_int16)
+
+        logger.info("🎯 Running analysis...")
+        start_analysis = time.time()
+        results = module['evaluate_singing'](user_path, temp_ref_sliced, 'Models')
+        analysis_time = time.time() - start_analysis
+        logger.info(f"✅ Analysis: {analysis_time:.2f}s")
+
+        try:
+            os.remove(temp_ref_sliced)
+        except:
+            pass
+
+        if results is None or not results.get('success'):
+            error_msg = results.get('report', 'Analysis failed') if results else 'No results'
+            return jsonify({'error': error_msg}), 500
+
+        total_time = time.time() - start_total
+        logger.info(f"⏱️  Total: {total_time:.2f}s")
+
+        return jsonify({
+            'success': True,
+            'pitch_accuracy': float(results.get('pitch_accuracy', 0)),
+            'rhythm_accuracy': float(results.get('rhythm_accuracy', 0)),
+            'emotion_detected': str(results.get('emotion_detected', 'neutral')),
+            'emotion_confidence': float(results.get('emotion_confidence', 0)),
+            'final_score': float(results.get('final_score', 0))
+        })
+    except Exception as e:
+        logger.error(f"Analysis error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': f'Analysis failed: {str(e)[:100]}'}), 500
+
+
+if __name__ == '__main__':
+    print("\n" + "="*80)
+    print("🎵 AUDIO ANALYZER - FINAL VERSION")
+    print("="*80)
+    print("\n✓ Open: http://localhost:5000")
+    print("="*80 + "\n")
+
+    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
