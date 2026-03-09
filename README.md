@@ -57,7 +57,7 @@ Audio Preprocessing (15s)
     ↓
 Auto-Segment Matching (2:07 first time)
 ├─ MFCC feature extraction
-├─ DTW alignment (3-pass algorithm)
+├─ DTW alignment (2-pass algorithm)
 └─ Confidence scoring
     ↓
 User Reviews & Adjusts
