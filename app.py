@@ -19,6 +19,26 @@ import threading
 import time
 import io
 
+def cleanup_temp_files():
+    """Remove old temporary files on startup"""
+    import glob
+
+    logger.info("🧹 Cleaning up old temporary files...")
+    cleaned = 0
+
+    try:
+        for old_file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'temp_*')):
+            try:
+                os.remove(old_file)
+                logger.info(f"✅ Deleted: {old_file}")
+                cleaned += 1
+            except Exception as e:
+                logger.error(f"❌ Failed to delete {old_file}: {e}")
+
+        logger.info(f"✅ Cleanup complete - deleted {cleaned} files")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
@@ -1131,6 +1151,10 @@ def allowed_file(filename):
 def index():
     return HTML_TEMPLATE
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Lightweight health check endpoint for uptime monitoring"""
+    return jsonify({'status': 'ok', 'message': 'App is running'}), 200
 
 @app.route('/api/upload', methods=['POST'])
 def upload_audio():
@@ -1306,8 +1330,18 @@ def analyze():
 
         try:
             os.remove(temp_ref_sliced)
-        except:
-            pass
+            logger.info("Temp file deleted")
+        except Exception as e:
+            logger.error(f"Failed to delete temp file: {e}")
+
+        # Also clean old temp files on startup
+        import glob
+        for old_file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'temp_*')):
+            try:
+                os.remove(old_file)
+                logger.info(f"Cleaned old temp: {old_file}")
+            except:
+                pass
 
         if results is None or not results.get('success'):
             error_msg = results.get('report', 'Analysis failed') if results else 'No results'
@@ -1330,6 +1364,8 @@ def analyze():
 
 
 if __name__ == '__main__':
+    cleanup_temp_files()
+
     print("\n" + "="*80)
     print("🎵 AUDIO ANALYZER - FINAL VERSION")
     print("="*80)
