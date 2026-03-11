@@ -228,10 +228,11 @@ def prewarm_module():
         logger.error("❌ Pre-warm FAILED — check logs above for details")
 
 
-# Start pre-warm as soon as this module is imported.
-# daemon=True so it doesn't block server shutdown.
-_prewarm_thread = threading.Thread(target=prewarm_module, daemon=True, name='prewarm')
-_prewarm_thread.start()
+# NOTE: Pre-warm is intentionally NOT started at import time.
+# Loading ML models takes ~86s and hits the 512MB RAM ceiling during startup,
+# causing Render to OOM-kill the process before it can serve any request (502).
+# Instead, loading is triggered lazily when the frontend calls /api/ready.
+# Flask binds the port instantly → Render health check passes → then we load.
 
 
 def get_module():
@@ -1358,18 +1359,32 @@ def health():
 @app.route('/api/ready', methods=['GET'])
 def ready():
     """
-    Tells the frontend whether the analysis engine has finished loading.
-    The frontend polls this before sending files, so it never fires a request
-    into a half-loaded server and gets truncated JSON back.
+    Two jobs:
+    1. Reports whether the analysis engine is ready.
+    2. TRIGGERS loading on the first call (lazy load).
+
+    Why lazy: loading ML models takes ~86s and ~400MB RAM. Starting it at
+    import time causes a 502 — Render OOM-kills the process before Flask can
+    even serve its first health check. By deferring to the first /api/ready
+    call, Flask binds the port instantly and Render's health check passes.
     """
+    global _module_loading
+
     if is_module_ready():
         return jsonify({'ready': True, 'status': 'ready'}), 200
-    elif is_module_failed():
+
+    if is_module_failed():
         return jsonify({'ready': False, 'status': 'failed',
                         'message': 'Analysis engine failed to load. Please redeploy.'}), 503
-    else:
-        return jsonify({'ready': False, 'status': 'loading',
-                        'message': 'Analysis engine is warming up, please wait…'}), 503
+
+    # Not loaded yet — kick off loading in background if not already running
+    if not _module_loading:
+        logger.info("🔥 /api/ready triggered lazy load of Analysis module...")
+        t = threading.Thread(target=prewarm_module, daemon=True, name='prewarm-lazy')
+        t.start()
+
+    return jsonify({'ready': False, 'status': 'loading',
+                    'message': 'Analysis engine is loading, please wait…'}), 503
 
 
 @app.route('/api/upload', methods=['POST'])
