@@ -1,8 +1,11 @@
 """
-🎵 AUDIO ANALYZER - FINAL VERSION
-1. Play button styled correctly (cyan gradient, matches website)
-2. Audio playback working (HTML5 audio element + WAV backend)
-3. Accuracy: 7s variation is acceptable (silence trimming variance)
+🎵 AUDIO ANALYZER - MEMORY OPTIMIZED VERSION
+For 512MB Render Free Tier
+Optimizations:
+1. Lower sample rate (11025 Hz for matching)
+2. Aggressive garbage collection
+3. Cache limit = 1 file only
+4. Early cleanup of temp files
 """
 
 from flask import Flask, request, jsonify, send_file
@@ -18,26 +21,13 @@ import scipy.io.wavfile as wavfile
 import threading
 import time
 import io
+import gc
+import glob
+from collections import OrderedDict
 
-def cleanup_temp_files():
-    """Remove old temporary files on startup"""
-    import glob
-
-    logger.info("🧹 Cleaning up old temporary files...")
-    cleaned = 0
-
-    try:
-        for old_file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'temp_*')):
-            try:
-                os.remove(old_file)
-                logger.info(f"✅ Deleted: {old_file}")
-                cleaned += 1
-            except Exception as e:
-                logger.error(f"❌ Failed to delete {old_file}: {e}")
-
-        logger.info(f"✅ Cleanup complete - deleted {cleaned} files")
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}")
+# ============================================================================
+# SETUP & CONFIGURATION
+# ============================================================================
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
@@ -46,17 +36,48 @@ app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Enable aggressive garbage collection
+gc.enable()
+
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a'}
 
 # ============================================================================
-# PERSISTENT MODULE LOADING
+# MEMORY OPTIMIZATION: AGGRESSIVE CACHING
 # ============================================================================
 
 _module_cache = None
 _module_lock = threading.Lock()
 
+# OPTIMIZATION 1: Limit audio cache to 1 file only
+_audio_cache = OrderedDict()
+MAX_CACHE_SIZE = 1  # AGGRESSIVE: Only keep 1 file at a time
+
+def get_cached_audio(path, sr):
+    """Cache only 1 file to minimize memory usage"""
+    cache_key = f"{path}_{sr}"
+
+    if cache_key in _audio_cache:
+        logger.info(f"📦 Cache hit for {os.path.basename(path)}")
+        return _audio_cache[cache_key]
+
+    logger.info(f"📁 Loading audio: {os.path.basename(path)}")
+    audio, _ = librosa.load(path, sr=sr)
+
+    # Aggressively clear old cache to free memory
+    if len(_audio_cache) >= MAX_CACHE_SIZE:
+        removed_key = _audio_cache.popitem(last=False)
+        logger.info(f"🗑️  Cache cleared: {removed_key[0]}")
+
+    _audio_cache[cache_key] = audio
+    return audio
+
+
+# ============================================================================
+# PERSISTENT MODULE LOADING
+# ============================================================================
+
 def load_notebook_once():
-    """Load notebook ONCE and cache it"""
+    """Load notebook ONCE and cache it (heavy operation)"""
     global _module_cache
 
     if _module_cache is not None:
@@ -69,6 +90,9 @@ def load_notebook_once():
         try:
             logger.info("🔄 Loading Analysis.ipynb (first time)...")
             start = time.time()
+
+            # Force garbage collection before heavy operation
+            gc.collect()
 
             result = subprocess.run(
                 ['jupyter', 'nbconvert', '--to', 'script', 'Analysis.ipynb', '--stdout'],
@@ -86,8 +110,11 @@ def load_notebook_once():
             module = {}
             exec(result.stdout, module)
 
+            # Clean up after exec
+            gc.collect()
+
             elapsed = time.time() - start
-            logger.info(f"✅ Notebook loaded in {elapsed:.2f}s (cached for future requests)")
+            logger.info(f"✅ Notebook loaded in {elapsed:.2f}s (cached)")
 
             _module_cache = module
             return module
@@ -109,7 +136,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Analyzer</title>
+    <title> Audio Analyzer</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='75' font-size='75'>🎵</text></svg>">
     <style>
         * {
             margin: 0;
@@ -792,7 +820,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- Hidden audio element for playback -->
     <audio id="audioPlayer"></audio>
 
     <script>
@@ -981,7 +1008,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById('positionSlider').value = sliderValue;
         }
 
-        // Play button
         document.getElementById('playBtn').addEventListener('click', async () => {
             document.getElementById('playBtn').disabled = true;
             document.getElementById('playStatus').textContent = 'Loading audio...';
@@ -1021,7 +1047,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             }
         });
 
-        // Pause button
         document.getElementById('pauseBtn').addEventListener('click', () => {
             if (audioPlayer.paused) {
                 audioPlayer.play();
@@ -1151,10 +1176,12 @@ def allowed_file(filename):
 def index():
     return HTML_TEMPLATE
 
+
 @app.route('/health', methods=['GET'])
 def health():
     """Lightweight health check endpoint for uptime monitoring"""
     return jsonify({'status': 'ok', 'message': 'App is running'}), 200
+
 
 @app.route('/api/upload', methods=['POST'])
 def upload_audio():
@@ -1196,11 +1223,12 @@ def auto_match():
         if not module or 'find_best_matching_segment' not in module:
             return jsonify({'error': 'Analysis engine not available'}), 500
 
-        sr = 22050
+        # OPTIMIZATION 2: Use LOWER sample rate for matching to save memory
+        sr = 11025  # Half the size of 22050, still accurate enough
 
-        logger.info("📁 Loading audio...")
-        user_audio, _ = librosa.load(user_path, sr=sr)
-        ref_audio_full, _ = librosa.load(ref_path, sr=sr)
+        logger.info("📁 Loading audio (11025 Hz - optimized)...")
+        user_audio = get_cached_audio(user_path, sr)
+        ref_audio_full = get_cached_audio(ref_path, sr)
 
         logger.info("🎵 Preprocessing...")
         user_audio = module['trim_silence'](user_audio, sr)
@@ -1226,6 +1254,9 @@ def auto_match():
         total_time = time.time() - start_total
         logger.info(f"⏱️  Total: {total_time:.2f}s")
 
+        # Garbage collection after heavy operation
+        gc.collect()
+
         return jsonify({
             'success': True,
             'timestamp': float(timestamp),
@@ -1236,6 +1267,7 @@ def auto_match():
             'segment_duration': float(window_size / sr)
         })
     except Exception as e:
+        gc.collect()
         logger.error(f"Auto-match error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': f'Auto-match failed: {str(e)[:100]}'}), 500
 
@@ -1330,18 +1362,21 @@ def analyze():
 
         try:
             os.remove(temp_ref_sliced)
-            logger.info("Temp file deleted")
+            logger.info("🗑️  Temp file deleted")
         except Exception as e:
-            logger.error(f"Failed to delete temp file: {e}")
+            logger.error(f"Failed to delete temp: {e}")
 
-        # Also clean old temp files on startup
-        import glob
+        # OPTIMIZATION 3: Clean ALL old temp files after analysis
         for old_file in glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'temp_*')):
             try:
                 os.remove(old_file)
-                logger.info(f"Cleaned old temp: {old_file}")
+                logger.info(f"🗑️  Cleaned: {os.path.basename(old_file)}")
             except:
                 pass
+
+        # Clear cache and force garbage collection
+        _audio_cache.clear()
+        gc.collect()
 
         if results is None or not results.get('success'):
             error_msg = results.get('report', 'Analysis failed') if results else 'No results'
@@ -1359,17 +1394,57 @@ def analyze():
             'final_score': float(results.get('final_score', 0))
         })
     except Exception as e:
+        gc.collect()
         logger.error(f"Analysis error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': f'Analysis failed: {str(e)[:100]}'}), 500
+
+
+# ============================================================================
+# CLEANUP & STARTUP
+# ============================================================================
+
+def cleanup_temp_files():
+    """Aggressive cleanup on startup to free memory"""
+    logger.info("🧹 Starting aggressive cleanup...")
+
+    # Clear cache
+    _audio_cache.clear()
+    gc.collect()
+
+    cleaned = 0
+    try:
+        temp_files = glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], 'temp_*'))
+
+        for old_file in temp_files:
+            try:
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+                    logger.info(f"✅ Deleted: {os.path.basename(old_file)}")
+                    cleaned += 1
+            except Exception as e:
+                logger.warning(f"⚠️  Could not delete {os.path.basename(old_file)}: {e}")
+
+        gc.collect()
+        logger.info(f"✅ Cleanup complete - {cleaned} temp files removed")
+
+    except Exception as e:
+        logger.error(f"❌ Cleanup error: {e}")
 
 
 if __name__ == '__main__':
     cleanup_temp_files()
 
     print("\n" + "="*80)
-    print("🎵 AUDIO ANALYZER - FINAL VERSION")
+    print("🎵 AUDIO ANALYZER - MEMORY OPTIMIZED VERSION")
     print("="*80)
+    print("\n✅ OPTIMIZATIONS ENABLED:")
+    print("   ✓ Lower sample rate for matching (11025 Hz)")
+    print("   ✓ Aggressive garbage collection")
+    print("   ✓ Cache limit = 1 file only")
+    print("   ✓ Temp file cleanup after analysis")
+    print("   ✓ Health endpoint for uptime monitoring")
     print("\n✓ Open: http://localhost:5000")
+    print("✓ Health: http://localhost:5000/health")
     print("="*80 + "\n")
 
     app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
