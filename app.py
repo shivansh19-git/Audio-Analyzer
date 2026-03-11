@@ -100,7 +100,7 @@ def load_notebook_once():
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=30
+                timeout=60
             )
 
             if result.returncode != 0:
