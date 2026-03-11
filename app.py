@@ -47,12 +47,12 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a'}
 
 _module_cache = None
 _module_lock = threading.Lock()
-_module_loading = False   # True while background pre-warm is in progress
-_module_failed  = False   # True if loading permanently failed
+_module_loading = False
+_module_failed  = False
 
-# OPTIMIZATION 1: Limit audio cache to 1 file only
+# OPTIMIZATION: Limit audio cache to 1 file only
 _audio_cache = OrderedDict()
-MAX_CACHE_SIZE = 1  # AGGRESSIVE: Only keep 1 file at a time
+MAX_CACHE_SIZE = 1
 
 def get_cached_audio(path, sr):
     """Cache only 1 file to minimize memory usage"""
@@ -80,14 +80,18 @@ def get_cached_audio(path, sr):
 
 def load_notebook_once():
     """
-    Load notebook ONCE and cache it.
+    Load the pre-converted Analysis.py module ONCE and cache it.
 
-    KEY MEMORY FIX: instead of capturing the entire converted script as a
-    Python string in RAM (capture_output=True) and then exec-ing it while
-    that string is still alive, we write the converted script to a temp file
-    on disk, read it, delete it, and THEN exec — so the string is freed before
-    the heavy imports run.  This cuts the peak first-load RAM spike roughly
-    in half.
+    WHY PRE-CONVERTED:
+    - Runtime nbconvert spawns a jupyter subprocess (~100MB RAM) PLUS holds
+      the entire script as a Python string PLUS exec() loads all imports/models.
+      All three overlap in memory → OOM kill on 512 MB Render free tier.
+    - Pre-converting offline and committing Analysis.py eliminates the subprocess
+      entirely. Loading is just a standard Python import: fast, predictable RAM.
+
+    HOW TO GENERATE Analysis.py (run this ONCE on your local machine):
+        jupyter nbconvert --to script Analysis.ipynb
+    Then commit Analysis.py alongside app.py.
     """
     global _module_cache, _module_loading, _module_failed
 
@@ -104,69 +108,76 @@ def load_notebook_once():
 
         _module_loading = True
         try:
-            logger.info("🔄 Loading Analysis.ipynb (first time)...")
+            logger.info("🔄 Loading Analysis module...")
             start = time.time()
-
             gc.collect()
 
-            # Write to a temp .py file on disk — avoids keeping the full
-            # script string alive in RAM while exec() runs the heavy imports.
-            tmp_script = os.path.join(tempfile.gettempdir(), '_analysis_converted.py')
+            # ── Method 1: import pre-converted Analysis.py (preferred) ──────
+            analysis_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Analysis.py')
+            if os.path.exists(analysis_py):
+                logger.info("   Found Analysis.py — using direct import (no subprocess)")
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("Analysis", analysis_py)
+                mod = importlib.util.module_from_spec(spec)
 
-            result = subprocess.run(
-                ['jupyter', 'nbconvert', '--to', 'script',
-                 'Analysis.ipynb', f'--output={tmp_script[:-3]}'],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=120
-            )
+                # Free everything we can before the heavy import
+                gc.collect()
+                spec.loader.exec_module(mod)
+                gc.collect()
 
-            if result.returncode != 0:
-                logger.error(f"Notebook conversion failed: {result.stderr}")
-                _module_failed = True
-                return None
+                # Expose as dict for compatibility with existing module['func'] calls
+                module = {k: getattr(mod, k) for k in dir(mod) if not k.startswith('__')}
 
-            # Free the subprocess result immediately — we no longer need stdout
-            del result
-            gc.collect()
+            # ── Method 2: fallback — runtime nbconvert (last resort) ─────────
+            else:
+                logger.warning("   Analysis.py not found — falling back to nbconvert (high RAM!)")
+                logger.warning("   Run: jupyter nbconvert --to script Analysis.ipynb")
+                logger.warning("   and commit Analysis.py to fix OOM crashes.")
 
-            if not os.path.exists(tmp_script):
-                logger.error("Converted script file not found after nbconvert")
-                _module_failed = True
-                return None
+                tmp_script = os.path.join(tempfile.gettempdir(), '_analysis_converted.py')
+                result = subprocess.run(
+                    ['jupyter', 'nbconvert', '--to', 'script',
+                     'Analysis.ipynb', f'--output={tmp_script[:-3]}'],
+                    capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=180
+                )
+                if result.returncode != 0:
+                    logger.error(f"nbconvert failed: {result.stderr[:300]}")
+                    _module_failed = True
+                    return None
 
-            # Read from disk, then delete the file before exec
-            with open(tmp_script, 'r', encoding='utf-8', errors='replace') as f:
-                script_code = f.read()
+                del result
+                gc.collect()
 
-            try:
-                os.remove(tmp_script)
-            except Exception:
-                pass
+                if not os.path.exists(tmp_script):
+                    logger.error("Converted script not found after nbconvert")
+                    _module_failed = True
+                    return None
 
-            # Now exec — the subprocess object is already freed
-            module = {}
-            exec(compile(script_code, '<Analysis.ipynb>', 'exec'), module)
+                with open(tmp_script, 'r', encoding='utf-8', errors='replace') as f:
+                    script_code = f.read()
+                try:
+                    os.remove(tmp_script)
+                except Exception:
+                    pass
 
-            # Free the source string too
-            del script_code
-            gc.collect()
+                module = {}
+                exec(compile(script_code, 'Analysis.ipynb', 'exec'), module)
+                del script_code
+                gc.collect()
 
             elapsed = time.time() - start
-            logger.info(f"✅ Notebook loaded in {elapsed:.2f}s (cached)")
-
+            logger.info(f"✅ Analysis module loaded in {elapsed:.2f}s (cached)")
             _module_cache = module
             return module
 
         except MemoryError:
-            logger.error("❌ OOM while loading notebook — 512 MB limit hit")
+            logger.error("❌ OOM while loading Analysis module — 512 MB limit hit")
             _module_failed = True
             gc.collect()
             return None
         except Exception as e:
-            logger.error(f"Error loading notebook: {e}")
+            logger.error(f"Error loading Analysis module: {e}")
             _module_failed = True
             return None
         finally:
@@ -174,19 +185,19 @@ def load_notebook_once():
 
 
 def prewarm_module():
-    """Call load_notebook_once() in a background thread at startup."""
-    logger.info("🔥 Pre-warming module in background thread...")
+    """Load the module eagerly so the first HTTP request never has to wait."""
+    logger.info("🔥 Pre-warming Analysis module...")
     load_notebook_once()
     if _module_cache:
-        logger.info("✅ Pre-warm complete — module ready for first request")
+        logger.info("✅ Pre-warm complete — Analysis module ready")
     else:
-        logger.error("❌ Pre-warm failed — check notebook conversion logs")
+        logger.error("❌ Pre-warm FAILED — check logs above for details")
 
 
-# ── Launch pre-warm immediately at import time ───────────────────────────────
-# Running as a daemon thread means it works under both `python app.py` AND
-# gunicorn (where the if __name__ == '__main__' block never runs).
-threading.Thread(target=prewarm_module, daemon=True, name='prewarm').start()
+# Start pre-warm as soon as this module is imported.
+# daemon=True so it doesn't block server shutdown.
+_prewarm_thread = threading.Thread(target=prewarm_module, daemon=True, name='prewarm')
+_prewarm_thread.start()
 
 
 def get_module():
