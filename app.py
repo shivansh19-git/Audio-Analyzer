@@ -128,6 +128,40 @@ def load_notebook_once():
                 # Expose as dict for compatibility with existing module['func'] calls
                 module = {k: getattr(mod, k) for k in dir(mod) if not k.startswith('__')}
 
+                # ── Diagnostic: log what functions were actually loaded ──────
+                fn_names = [k for k, v in module.items() if callable(v) and not k.startswith('_')]
+                logger.info(f"   Functions available in module: {fn_names}")
+
+                # ── Check for the required functions ─────────────────────────
+                required = ['find_best_matching_segment', 'evaluate_singing', 'trim_silence', 'validate_pitched_content']
+                missing  = [f for f in required if f not in module]
+                if missing:
+                    logger.error(f"   ❌ Missing required functions: {missing}")
+                    logger.error(f"   This usually means Analysis.py has IPython magic commands")
+                    logger.error(f"   that failed silently. See fix instructions below.")
+                    # Try stripping IPython artifacts and re-executing
+                    logger.info("   🔧 Attempting to strip IPython artifacts and re-load...")
+                    import re as _re
+                    with open(analysis_py, 'r', encoding='utf-8', errors='replace') as _f:
+                        raw = _f.read()
+                    # Remove IPython magic lines and get_ipython() calls
+                    cleaned = _re.sub(r'^get_ipython\(\).*$', '', raw, flags=_re.MULTILINE)
+                    cleaned = _re.sub(r'^# In\[.*?\].*$', '', cleaned, flags=_re.MULTILINE)
+                    cleaned = _re.sub(r'^#\s*coding:.*$', '', cleaned, flags=_re.MULTILINE)
+                    module2 = {}
+                    exec(compile(cleaned, 'Analysis.py', 'exec'), module2)
+                    del cleaned, raw
+                    gc.collect()
+                    fn_names2 = [k for k, v in module2.items() if callable(v) and not k.startswith('_')]
+                    logger.info(f"   After strip — functions available: {fn_names2}")
+                    missing2 = [f for f in required if f not in module2]
+                    if not missing2:
+                        logger.info("   ✅ Strip successful — using cleaned module")
+                        module = module2
+                    else:
+                        logger.error(f"   ❌ Still missing after strip: {missing2}")
+                        logger.error(f"   Check that Analysis.ipynb actually defines: {missing2}")
+
             # ── Method 2: fallback — runtime nbconvert (last resort) ─────────
             else:
                 logger.warning("   Analysis.py not found — falling back to nbconvert (high RAM!)")
@@ -1413,42 +1447,101 @@ def auto_match():
         if not has_content_user or not has_content_ref:
             return jsonify({'error': 'No voice content detected'}), 400
 
-        logger.info("🔍 Auto-matching (DTW downsampled)...")
+        logger.info("🔍 Auto-matching (chunked DTW)...")
         start_match = time.time()
 
-        # OPTIMIZATION: DTW Downsampling
-        # 4x fewer samples = ~16x smaller DTW matrix = ~16x less RAM during matching
-        # At 11025 Hz base, downsampled to ~2756 Hz — sufficient for segment location
+        # ── Chunked DTW ────────────────────────────────────────────────────────
+        # ROOT CAUSE OF OOM: passing the full 181s reference to find_best_matching_segment
+        # at once forces DTW to hold a [user_frames × ref_frames] matrix for the
+        # entire reference — easily 200-400 MB for long songs on 512 MB Render.
+        #
+        # FIX: downsample both signals, then slide a 30s chunk window across the
+        # reference with 5s overlap.  DTW runs on one small chunk at a time;
+        # peak RAM is bounded by chunk size, not total reference length.
+        #
+        # Memory budget per chunk (30s ref, 14s user, ~2756 Hz after 4x DS):
+        #   user_frames  ≈ 14 * 2756 / 512 ≈ 75 MFCC frames
+        #   chunk_frames ≈ 30 * 2756 / 512 ≈ 161 MFCC frames
+        #   DTW matrix   ≈ 75 × 161 × 8 B  ≈ 96 KB  ✅ (vs ~300 MB for full ref)
+
         DOWNSAMPLE_FACTOR = 4
+        sr_ds = sr // DOWNSAMPLE_FACTOR          # ~2756 Hz
+
         user_audio_ds = user_audio[::DOWNSAMPLE_FACTOR]
-        ref_audio_ds  = ref_audio_full[::DOWNSAMPLE_FACTOR]
-        sr_ds = sr // DOWNSAMPLE_FACTOR
 
+        CHUNK_SECS    = 30                        # seconds of ref per DTW call
+        OVERLAP_SECS  = 5                         # overlap so we don't miss a boundary match
+        chunk_samples = CHUNK_SECS  * sr_ds
+        step_samples  = (CHUNK_SECS - OVERLAP_SECS) * sr_ds
+
+        ref_ds = ref_audio_full[::DOWNSAMPLE_FACTOR]
+        ref_duration = len(ref_audio_full) / sr
+
+        best_confidence  = -1.0
+        best_timestamp   = 0.0
+        best_matched_seg = user_audio_ds          # fallback
+
+        num_chunks = max(1, int(np.ceil((len(ref_ds) - chunk_samples) / step_samples)) + 1)
         logger.info(
-            f"   Samples: {len(user_audio):,} -> {len(user_audio_ds):,} (user)  "
-            f"{len(ref_audio_full):,} -> {len(ref_audio_ds):,} (ref)"
+            f"   user={len(user_audio_ds):,} smp  ref={len(ref_ds):,} smp  "
+            f"chunk={CHUNK_SECS}s  chunks={num_chunks}"
         )
 
-        matched_segment, timestamp_ds, confidence = module['find_best_matching_segment'](
-            user_audio_ds, ref_audio_ds, sr_ds
-        )
+        for chunk_idx in range(num_chunks):
+            chunk_start = chunk_idx * step_samples
+            chunk_end   = min(chunk_start + chunk_samples, len(ref_ds))
+            ref_chunk   = ref_ds[chunk_start:chunk_end]
 
-        # timestamp is already in seconds inside the function, no scaling needed
-        timestamp = float(timestamp_ds)
+            # Skip chunks shorter than the user audio (can't match)
+            if len(ref_chunk) < len(user_audio_ds):
+                continue
+
+            try:
+                seg, ts_in_chunk, conf = module['find_best_matching_segment'](
+                    user_audio_ds, ref_chunk, sr_ds
+                )
+            except Exception as chunk_err:
+                logger.warning(f"   Chunk {chunk_idx} failed: {chunk_err}")
+                continue
+
+            # ts_in_chunk is seconds from start of this chunk — offset to full ref
+            chunk_offset_secs = chunk_start / sr_ds
+            ts_global = ts_in_chunk + chunk_offset_secs
+
+            logger.info(
+                f"   Chunk {chunk_idx+1}/{num_chunks}: "
+                f"offset={chunk_offset_secs:.1f}s  ts={ts_global:.2f}s  conf={conf:.3f}"
+            )
+
+            if conf > best_confidence:
+                best_confidence  = conf
+                best_timestamp   = ts_global
+                best_matched_seg = seg
+
+            # Free chunk from memory immediately
+            del ref_chunk, seg
+            gc.collect()
+
+        # Free downsampled ref — no longer needed
+        del ref_ds
+        gc.collect()
+
+        timestamp  = float(best_timestamp)
+        confidence = float(best_confidence)
+        # Scale window_size back from sr_ds domain to sr (11025 Hz) domain
+        window_size = len(best_matched_seg) * DOWNSAMPLE_FACTOR
 
         match_time = time.time() - start_match
-        logger.info(f"✅ Match time: {match_time:.2f}s  confidence={confidence:.3f}  t={timestamp:.2f}s")
-
-        ref_duration = len(ref_audio_full) / sr
-        # BUG FIX: matched_segment is in downsampled domain (sr_ds = sr/4).
-        # Scale back to original sr domain so window_size, segment_duration,
-        # and all downstream sample-slicing are correct.
-        window_size = len(matched_segment) * DOWNSAMPLE_FACTOR
+        logger.info(
+            f"✅ Best match: t={timestamp:.2f}s  confidence={confidence:.3f}  "
+            f"window={window_size} smp ({window_size/sr:.2f}s)  took {match_time:.2f}s"
+        )
 
         total_time = time.time() - start_total
         logger.info(f"⏱️  Total: {total_time:.2f}s")
 
-        # Garbage collection after heavy operation
+        # Final cleanup
+        del user_audio_ds, best_matched_seg
         gc.collect()
 
         return jsonify({
