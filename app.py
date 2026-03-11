@@ -30,7 +30,7 @@ from collections import OrderedDict
 # ============================================================================
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # OPTIMIZATION: Hard cap at 10 MB
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
 logging.basicConfig(level=logging.INFO)
@@ -1114,7 +1114,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         user_path: state.userPath,
                         ref_path: state.refPath,
                         selected_start: state.selectedStart,
-                        window_size: state.windowSize
+                        window_size: state.windowSize,
+                        sr_match: state.sr   // FIX: needed to scale window_size to analysis sr
                     })
                 });
 
@@ -1195,6 +1196,24 @@ def upload_audio():
         if not user_file or not ref_file or not allowed_file(user_file.filename) or not allowed_file(ref_file.filename):
             return jsonify({'error': 'Invalid files'}), 400
 
+        # OPTIMIZATION: Reject oversized files before they consume memory
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB max per file
+        user_file.seek(0, 2)   # Seek to end
+        user_size = user_file.tell()
+        user_file.seek(0)      # Reset to start
+
+        ref_file.seek(0, 2)
+        ref_size = ref_file.tell()
+        ref_file.seek(0)
+
+        if user_size > MAX_FILE_SIZE:
+            logger.warning(f"⚠️  User file too large: {user_size / 1024 / 1024:.1f} MB")
+            return jsonify({'error': f'User audio too large ({user_size / 1024 / 1024:.1f} MB). Max is 10 MB.'}), 400
+
+        if ref_size > MAX_FILE_SIZE:
+            logger.warning(f"⚠️  Reference file too large: {ref_size / 1024 / 1024:.1f} MB")
+            return jsonify({'error': f'Reference audio too large ({ref_size / 1024 / 1024:.1f} MB). Max is 10 MB.'}), 400
+
         user_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f'user_{user_file.filename}'))
         ref_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f'ref_{ref_file.filename}'))
 
@@ -1240,16 +1259,37 @@ def auto_match():
         if not has_content_user or not has_content_ref:
             return jsonify({'error': 'No voice content detected'}), 400
 
-        logger.info("🔍 Auto-matching...")
+        logger.info("🔍 Auto-matching (DTW downsampled)...")
         start_match = time.time()
-        matched_segment, timestamp, confidence = module['find_best_matching_segment'](
-            user_audio, ref_audio_full, sr
+
+        # OPTIMIZATION: DTW Downsampling
+        # 4x fewer samples = ~16x smaller DTW matrix = ~16x less RAM during matching
+        # At 11025 Hz base, downsampled to ~2756 Hz — sufficient for segment location
+        DOWNSAMPLE_FACTOR = 4
+        user_audio_ds = user_audio[::DOWNSAMPLE_FACTOR]
+        ref_audio_ds  = ref_audio_full[::DOWNSAMPLE_FACTOR]
+        sr_ds = sr // DOWNSAMPLE_FACTOR
+
+        logger.info(
+            f"   Samples: {len(user_audio):,} -> {len(user_audio_ds):,} (user)  "
+            f"{len(ref_audio_full):,} -> {len(ref_audio_ds):,} (ref)"
         )
+
+        matched_segment, timestamp_ds, confidence = module['find_best_matching_segment'](
+            user_audio_ds, ref_audio_ds, sr_ds
+        )
+
+        # timestamp is already in seconds inside the function, no scaling needed
+        timestamp = float(timestamp_ds)
+
         match_time = time.time() - start_match
-        logger.info(f"✅ Match time: {match_time:.2f}s")
+        logger.info(f"✅ Match time: {match_time:.2f}s  confidence={confidence:.3f}  t={timestamp:.2f}s")
 
         ref_duration = len(ref_audio_full) / sr
-        window_size = len(matched_segment)
+        # BUG FIX: matched_segment is in downsampled domain (sr_ds = sr/4).
+        # Scale back to original sr domain so window_size, segment_duration,
+        # and all downstream sample-slicing are correct.
+        window_size = len(matched_segment) * DOWNSAMPLE_FACTOR
 
         total_time = time.time() - start_total
         logger.info(f"⏱️  Total: {total_time:.2f}s")
@@ -1322,6 +1362,9 @@ def analyze():
         ref_path = data.get('ref_path')
         selected_start = data.get('selected_start')
         window_size = data.get('window_size')
+        # sr_match = sr used during auto-match (11025). window_size is in those samples.
+        # We load audio at sr=22050 here, so we must scale window_size proportionally.
+        sr_match = int(data.get('sr_match', 11025))
 
         if not all([user_path, ref_path, selected_start is not None, window_size]):
             return jsonify({'error': 'Missing parameters'}), 400
@@ -1345,7 +1388,10 @@ def analyze():
 
         logger.info("📏 Extracting segment...")
         start_sample = int(float(selected_start) * sr)
-        end_sample = min(start_sample + int(window_size), len(ref_audio_full))
+        # window_size is in sr_match (11025 Hz) samples; scale to analysis sr (22050 Hz)
+        scaled_window = int(window_size * sr / sr_match)
+        end_sample = min(start_sample + scaled_window, len(ref_audio_full))
+        logger.info(f"   window_size={window_size} @ {sr_match}Hz  →  {scaled_window} samples @ {sr}Hz")
         ref_audio_sliced = ref_audio_full[start_sample:end_sample]
 
         logger.info("💾 Saving segment...")
@@ -1439,6 +1485,9 @@ if __name__ == '__main__':
     print("="*80)
     print("\n✅ OPTIMIZATIONS ENABLED:")
     print("   ✓ Lower sample rate for matching (11025 Hz)")
+    print("   ✓ DTW downsampling 4x  --  ~16x smaller matrix, ~16x less RAM")
+    print("   ✓ File size hard cap (10 MB per file, rejected at upload)")
+    print("   ✓ MAX_CONTENT_LENGTH reduced to 10 MB (Flask-level guard)")
     print("   ✓ Aggressive garbage collection")
     print("   ✓ Cache limit = 1 file only")
     print("   ✓ Temp file cleanup after analysis")
