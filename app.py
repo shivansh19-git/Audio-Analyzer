@@ -47,6 +47,8 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a'}
 
 _module_cache = None
 _module_lock = threading.Lock()
+_module_loading = False   # True while background pre-warm is in progress
+_module_failed  = False   # True if loading permanently failed
 
 # OPTIMIZATION 1: Limit audio cache to 1 file only
 _audio_cache = OrderedDict()
@@ -77,40 +79,79 @@ def get_cached_audio(path, sr):
 # ============================================================================
 
 def load_notebook_once():
-    """Load notebook ONCE and cache it (heavy operation)"""
-    global _module_cache
+    """
+    Load notebook ONCE and cache it.
+
+    KEY MEMORY FIX: instead of capturing the entire converted script as a
+    Python string in RAM (capture_output=True) and then exec-ing it while
+    that string is still alive, we write the converted script to a temp file
+    on disk, read it, delete it, and THEN exec — so the string is freed before
+    the heavy imports run.  This cuts the peak first-load RAM spike roughly
+    in half.
+    """
+    global _module_cache, _module_loading, _module_failed
 
     if _module_cache is not None:
         return _module_cache
+    if _module_failed:
+        return None
 
     with _module_lock:
         if _module_cache is not None:
             return _module_cache
+        if _module_failed:
+            return None
 
+        _module_loading = True
         try:
             logger.info("🔄 Loading Analysis.ipynb (first time)...")
             start = time.time()
 
-            # Force garbage collection before heavy operation
             gc.collect()
 
+            # Write to a temp .py file on disk — avoids keeping the full
+            # script string alive in RAM while exec() runs the heavy imports.
+            tmp_script = os.path.join(tempfile.gettempdir(), '_analysis_converted.py')
+
             result = subprocess.run(
-                ['jupyter', 'nbconvert', '--to', 'script', 'Analysis.ipynb', '--stdout'],
+                ['jupyter', 'nbconvert', '--to', 'script',
+                 'Analysis.ipynb', f'--output={tmp_script[:-3]}'],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=60
+                timeout=120
             )
 
             if result.returncode != 0:
                 logger.error(f"Notebook conversion failed: {result.stderr}")
+                _module_failed = True
                 return None
 
-            module = {}
-            exec(result.stdout, module)
+            # Free the subprocess result immediately — we no longer need stdout
+            del result
+            gc.collect()
 
-            # Clean up after exec
+            if not os.path.exists(tmp_script):
+                logger.error("Converted script file not found after nbconvert")
+                _module_failed = True
+                return None
+
+            # Read from disk, then delete the file before exec
+            with open(tmp_script, 'r', encoding='utf-8', errors='replace') as f:
+                script_code = f.read()
+
+            try:
+                os.remove(tmp_script)
+            except Exception:
+                pass
+
+            # Now exec — the subprocess object is already freed
+            module = {}
+            exec(compile(script_code, '<Analysis.ipynb>', 'exec'), module)
+
+            # Free the source string too
+            del script_code
             gc.collect()
 
             elapsed = time.time() - start
@@ -118,13 +159,50 @@ def load_notebook_once():
 
             _module_cache = module
             return module
+
+        except MemoryError:
+            logger.error("❌ OOM while loading notebook — 512 MB limit hit")
+            _module_failed = True
+            gc.collect()
+            return None
         except Exception as e:
             logger.error(f"Error loading notebook: {e}")
+            _module_failed = True
             return None
+        finally:
+            _module_loading = False
+
+
+def prewarm_module():
+    """Call load_notebook_once() in a background thread at startup."""
+    logger.info("🔥 Pre-warming module in background thread...")
+    load_notebook_once()
+    if _module_cache:
+        logger.info("✅ Pre-warm complete — module ready for first request")
+    else:
+        logger.error("❌ Pre-warm failed — check notebook conversion logs")
+
+
+# ── Launch pre-warm immediately at import time ───────────────────────────────
+# Running as a daemon thread means it works under both `python app.py` AND
+# gunicorn (where the if __name__ == '__main__' block never runs).
+threading.Thread(target=prewarm_module, daemon=True, name='prewarm').start()
 
 
 def get_module():
     return load_notebook_once()
+
+
+def is_module_ready():
+    return _module_cache is not None
+
+
+def is_module_loading():
+    return _module_loading
+
+
+def is_module_failed():
+    return _module_failed
 
 
 # ============================================================================
@@ -861,6 +939,50 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
+        // ── Engine readiness check ──────────────────────────────────────────
+        // Poll /api/ready so we never fire a request while the server is still
+        // loading the notebook — which causes the OOM-truncated-JSON bug.
+        let engineReady = false;
+
+        async function pollUntilReady() {
+            const btn = document.getElementById('analyzeBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Engine warming up…';
+
+            const maxAttempts = 40;   // 40 × 5s = 3 min 20 s max wait
+            for (let i = 0; i < maxAttempts; i++) {
+                try {
+                    const res = await fetch('/api/ready');
+                    const data = await res.json();
+
+                    if (data.ready) {
+                        engineReady = true;
+                        btn.textContent = '🎵 Auto-Match & Analyze';
+                        updateAnalyzeButton();   // re-apply file-presence check
+                        showMessage('Analysis engine ready!', 'success');
+                        return;
+                    } else if (data.status === 'failed') {
+                        btn.textContent = '❌ Engine failed to load';
+                        showMessage('Analysis engine failed to load. Please redeploy.', 'error');
+                        return;
+                    } else {
+                        const dots = '.'.repeat((i % 3) + 1);
+                        btn.textContent = `⏳ Warming up${dots}`;
+                        showMessage(`Warming up analysis engine… (${i + 1}/${maxAttempts})`, 'info');
+                    }
+                } catch (e) {
+                    // network blip — keep trying
+                }
+                await new Promise(r => setTimeout(r, 5000));  // wait 5 s
+            }
+
+            btn.textContent = '⚠️ Timed out — refresh page';
+            showMessage('Engine warm-up timed out. Please refresh.', 'error');
+        }
+
+        // Start polling immediately when page loads
+        pollUntilReady();
+
         function getGrade(score) {
             if (score >= 90) return { grade: 'A+', class: 'grade-A' };
             if (score >= 80) return { grade: 'A', class: 'grade-A' };
@@ -898,10 +1020,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function updateAnalyzeButton() {
             const hasUser = document.getElementById('userAudio').files[0];
             const hasRef = document.getElementById('refAudio').files[0];
-            document.getElementById('analyzeBtn').disabled = !(hasUser && hasRef);
+            document.getElementById('analyzeBtn').disabled = !(hasUser && hasRef && engineReady);
         }
 
         document.getElementById('analyzeBtn').addEventListener('click', async () => {
+            if (!engineReady) {
+                showMessage('Engine is still warming up, please wait…', 'error');
+                return;
+            }
             const userFile = document.getElementById('userAudio').files[0];
             const refFile = document.getElementById('refAudio').files[0];
 
@@ -1182,6 +1308,23 @@ def index():
 def health():
     """Lightweight health check endpoint for uptime monitoring"""
     return jsonify({'status': 'ok', 'message': 'App is running'}), 200
+
+
+@app.route('/api/ready', methods=['GET'])
+def ready():
+    """
+    Tells the frontend whether the analysis engine has finished loading.
+    The frontend polls this before sending files, so it never fires a request
+    into a half-loaded server and gets truncated JSON back.
+    """
+    if is_module_ready():
+        return jsonify({'ready': True, 'status': 'ready'}), 200
+    elif is_module_failed():
+        return jsonify({'ready': False, 'status': 'failed',
+                        'message': 'Analysis engine failed to load. Please redeploy.'}), 503
+    else:
+        return jsonify({'ready': False, 'status': 'loading',
+                        'message': 'Analysis engine is warming up, please wait…'}), 503
 
 
 @app.route('/api/upload', methods=['POST'])
