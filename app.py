@@ -1456,11 +1456,22 @@ def auto_match():
         user_audio = module['trim_silence'](user_audio, sr)
         ref_audio_full = module['trim_silence'](ref_audio_full, sr)
 
-        has_content_user, _ = module['validate_pitched_content'](user_audio)
-        has_content_ref, _ = module['validate_pitched_content'](ref_audio_full)
+        # MEMORY FIX: replaced librosa.pyin() validation (OOM killer on 181s ref)
+        # with a cheap RMS energy check. pyin() on 181s audio was creating ~290MB
+        # of intermediate arrays — the #1 cause of OOM kills on this server.
+        # RMS check is instant, uses <1MB, and is sufficient: if the file has
+        # energy it has content. The reference is a song — pyin is overkill.
+        def has_audio_content(audio, threshold=0.001):
+            rms = float(np.sqrt(np.mean(audio ** 2)))
+            return rms > threshold, rms * 100
 
-        if not has_content_user or not has_content_ref:
-            return jsonify({'error': 'No voice content detected'}), 400
+        has_content_user, _ = has_audio_content(user_audio)
+        has_content_ref, _  = has_audio_content(ref_audio_full)
+
+        if not has_content_user:
+            return jsonify({'error': 'User audio appears silent — check your recording'}), 400
+        if not has_content_ref:
+            return jsonify({'error': 'Reference audio appears silent'}), 400
 
         logger.info("🔍 Auto-matching (chunked DTW)...")
         start_match = time.time()
