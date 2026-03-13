@@ -234,7 +234,18 @@ def find_best_matching_segment(user_audio, ref_audio, sr, window_size=None):
     # PASS 2: MFCC + DTW on top candidates
     print("\nPASS 2: MFCC + DTW matching on top candidates...")
 
-    mfcc_user = librosa.feature.mfcc(y=user_audio, sr=sr, n_mfcc=8)
+    mfcc_user_raw = librosa.feature.mfcc(y=user_audio, sr=sr, n_mfcc=8)
+
+    # Normalize user MFCCs independently (zero-mean/unit-variance per coefficient).
+    # Raw MFCC values span -200 to +100 making exp(-distance) always ~0.
+    # Each clip must be normalized with its OWN stats — using user stats on ref
+    # would make every segment look similar to user regardless of content.
+    def normalize_mfcc(mfcc):
+        mean = mfcc.mean(axis=1, keepdims=True)
+        std  = mfcc.std(axis=1, keepdims=True) + 1e-8
+        return (mfcc - mean) / std
+
+    mfcc_user = normalize_mfcc(mfcc_user_raw)
 
     best_confidence = 0
     best_start = 0
@@ -244,23 +255,26 @@ def find_best_matching_segment(user_audio, ref_audio, sr, window_size=None):
         timestamp = start / sr
         ref_segment = ref_audio[start:start + window_size]
 
-        mfcc_ref = librosa.feature.mfcc(y=ref_segment, sr=sr, n_mfcc=8)
+        mfcc_ref_raw = librosa.feature.mfcc(y=ref_segment, sr=sr, n_mfcc=8)
+        mfcc_ref = normalize_mfcc(mfcc_ref_raw)  # normalize ref independently
 
         if mfcc_user.shape[1] == 0 or mfcc_ref.shape[1] == 0:
             continue
 
         min_steps = min(mfcc_user.shape[1], mfcc_ref.shape[1])
         mfcc_user_m = mfcc_user[:, :min_steps]
-        mfcc_ref_m = mfcc_ref[:, :min_steps]
+        mfcc_ref_m  = mfcc_ref[:, :min_steps]
 
+        # After normalization, mean abs diff is typically 0.5-2.0 for good matches
         spectral_distance = np.mean(np.abs(mfcc_user_m - mfcc_ref_m))
         mfcc_sim = 100 * np.exp(-spectral_distance)
         mfcc_sim = float(np.clip(mfcc_sim, 0, 100))
 
         try:
             D, _ = dtw(mfcc_user_m, mfcc_ref_m, metric='euclidean')
+            # Normalize by path length; after MFCC normalization typical cost is 1-5
             dtw_cost = D[-1, -1] / (mfcc_user_m.shape[1] + mfcc_ref_m.shape[1])
-            dtw_sim = 100 * np.exp(-dtw_cost / 5)
+            dtw_sim = 100 * np.exp(-dtw_cost)
             dtw_sim = float(np.clip(dtw_sim, 0, 100))
         except Exception as e:
             print(f"  @ {timestamp:.1f}s: DTW error - {e}")
@@ -435,7 +449,7 @@ def handle_key_shift(f0_user, voiced_user, f0_ref, voiced_ref):
     key_user = detect_key_from_pitch(f0_user, voiced_user)
 
     print("Detecting reference key:")
-    key_ref = detect_key_from_pitch(f0_ref, voiced_user)
+    key_ref = detect_key_from_pitch(f0_ref, voiced_ref)  # FIX: was using voiced_user
 
     if key_user is None or key_ref is None:
         print("  Could not detect keys, skipping key shift")
@@ -457,106 +471,83 @@ def handle_key_shift(f0_user, voiced_user, f0_ref, voiced_ref):
     return f0_user, 0
 
 
-def compute_pitch_accuracy(user_audio, ref_audio, sr, tolerance_cents=150.0):
+def compute_pitch_accuracy(user_audio, ref_audio, sr):
+    # Top-3 chroma hit rate WITH HPSS (harmonic-percussive separation).
+    # HPSS removes drums/percussion from reference before chroma extraction,
+    # leaving only melodic/harmonic content. This makes the melody note
+    # appear much more prominently in chroma bins vs full-band mix noise.
     print("\n" + "="*60)
-    print("PITCH ACCURACY CALCULATION (TEMPO-AWARE)")
+    print("PITCH ACCURACY (HPSS + TOP-3 CHROMA)")
     print("="*60)
 
     try:
         if user_audio is None or len(user_audio) == 0 or ref_audio is None or len(ref_audio) == 0:
             return 0.0
 
-        fmax = min(300, int(sr // 2) - 50)
-        fmin = 50
+        HOP = 512
 
-        print("\n[EXTRACTING PITCH]")
-        f0_user, _, voiced_probs_user = librosa.pyin(
-            user_audio, fmin=fmin, fmax=fmax, sr=sr, frame_length=2048, hop_length=1024
+        # pyin on clean user vocal
+        print("\n[USER: pyin]")
+        f0_user, _, voiced_probs = librosa.pyin(
+            user_audio, fmin=80, fmax=1000, sr=sr,
+            frame_length=2048, hop_length=HOP
         )
-        f0_ref, _, voiced_probs_ref = librosa.pyin(
-            ref_audio, fmin=fmin, fmax=fmax, sr=sr, frame_length=2048, hop_length=1024
+        voiced_mask  = (voiced_probs > 0.5) & (f0_user > 0) & ~np.isnan(f0_user)
+        f0_u         = f0_user[voiced_mask]
+        voiced_idx   = np.where(voiced_mask)[0]
+        n_user_total = len(f0_user)
+
+        print(f"  Total: {n_user_total}, Voiced: {len(f0_u)}")
+        if len(f0_u) < 5:
+            print("  Not enough voiced frames")
+            return 0.0
+
+        # HPSS on reference: remove drums, keep melody/chords
+        print("\n[REF: HPSS + chroma_cqt]")
+        D_ref       = librosa.stft(ref_audio)
+        H_ref, _    = librosa.decompose.hpss(D_ref)
+        ref_harmonic = librosa.istft(H_ref, length=len(ref_audio))
+
+        chroma_ref = librosa.feature.chroma_cqt(
+            y=ref_harmonic, sr=sr, hop_length=HOP, bins_per_octave=36
         )
+        n_ref = chroma_ref.shape[1]
+        print(f"  Ref frames: {n_ref}")
 
-        if len(f0_user) == 0 or len(f0_ref) == 0:
-            return 0.0
+        # Top-3 hit rate
+        print(f"\n[TOP-3 HIT RATE] ({len(f0_u)} voiced frames)")
+        hits = 0
+        for frame_idx, f0 in zip(voiced_idx, f0_u):
+            midi = 12 * np.log2(f0 / 440.0) + 69
+            pc   = int(round(midi)) % 12
 
-        print(f"  User f0: {len(f0_user)} frames")
-        print(f"  Ref f0:  {len(f0_ref)} frames")
+            ref_frame = min(int(frame_idx * n_ref / n_user_total), n_ref - 1)
+            top3      = set(np.argsort(chroma_ref[:, ref_frame])[-3:])
+            if pc in top3:
+                hits += 1
 
-        tempo_ratio, user_tempo, ref_tempo = estimate_tempo_ratio(user_audio, ref_audio, sr)
+        hit_rate = hits / len(f0_u)
 
-        if abs(tempo_ratio - 1.0) > 0.05:
-            print(f"\n[TEMPO CORRECTION]")
-            print(f"  Warping user f0 by {tempo_ratio:.3f}x")
-            f0_user = warp_f0_to_reference_tempo(f0_user, tempo_ratio)
+        # Scale: random=25%, expected good=55%
+        RANDOM   = 0.25
+        EXPECTED = 0.40
+        accuracy = float(np.clip((hit_rate - RANDOM) / (EXPECTED - RANDOM) * 100, 0, 100))
+        # Power curve: boosts mid-range scores without affecting 0% or 100%
+        accuracy = float(np.clip((accuracy / 100) ** 0.4 * 100, 0, 100))
 
-        valid_user = (voiced_probs_user > 0.1) & (f0_user > 0) & ~np.isnan(f0_user) & ~np.isinf(f0_user)
-        valid_ref = (voiced_probs_ref > 0.1) & (f0_ref > 0) & ~np.isnan(f0_ref) & ~np.isinf(f0_ref)
-
-        f0_user_valid = f0_user[valid_user]
-        f0_ref_valid = f0_ref[valid_ref]
-
-        if len(f0_user_valid) < 5 or len(f0_ref_valid) < 5:
-            print("Not enough voiced frames for DTW alignment")
-            return 0.0
-
-        print(f"\n[DTW ALIGNMENT]")
-        f0_user_aligned, f0_ref_aligned = align_f0_sequences_dtw(f0_user_valid, f0_ref_valid)
-        print(f"  Aligned: {len(f0_user_aligned)} frames")
-
-        try:
-            voiced_user_aligned = np.ones(len(f0_user_aligned), dtype=bool)
-            voiced_ref_aligned = np.ones(len(f0_ref_aligned), dtype=bool)
-            f0_user_aligned, semitone_offset = handle_key_shift(
-                f0_user_aligned, voiced_user_aligned, f0_ref_aligned, voiced_ref_aligned
-            )
-        except Exception as e:
-            print(f"  Warning: Key shift detection failed: {e}")
-
-        print(f"\n[COMPUTING ACCURACY]")
-
-        invalid_mask = (
-            np.isnan(f0_user_aligned) | np.isnan(f0_ref_aligned) |
-            np.isinf(f0_user_aligned) | np.isinf(f0_ref_aligned) |
-            (f0_user_aligned <= 0) | (f0_ref_aligned <= 0)
-        )
-        f0_user_clean = f0_user_aligned[~invalid_mask]
-        f0_ref_clean = f0_ref_aligned[~invalid_mask]
-
-        if len(f0_user_clean) < 2:
-            return 0.0
-
-        with np.errstate(divide='ignore', invalid='ignore'):
-            cents_diff = 1200 * np.log2((f0_user_clean + 1e-8) / (f0_ref_clean + 1e-8))
-        cents_error = np.abs(np.nan_to_num(cents_diff, nan=0.0, posinf=0.0, neginf=0.0))
-        cents_error = cents_error[cents_error < 1000]
-
-        if len(cents_error) < 2:
-            return 0.0
-
-        accuracy = 100 * np.sum(cents_error < tolerance_cents) / len(cents_error)
-        accuracy = float(np.clip(accuracy, 0, 100))
-
-        mean_error = np.mean(cents_error)
-        std_error = np.std(cents_error)
-
+        print(f"  Hits: {hits}/{len(f0_u)} = {hit_rate*100:.1f}%")
+        print(f"  Random baseline: {RANDOM*100:.0f}%")
         print(f"✓ Pitch accuracy: {accuracy:.1f}%")
-        print(f"  Mean error: {mean_error:.1f} cents")
-        print(f"  Std error:  {std_error:.1f} cents")
-        print(f"  Frames compared: {len(cents_error)}")
-        print(f"  Tempo ratio: {tempo_ratio:.3f}x")
         print("="*60 + "\n")
 
         return accuracy
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR in compute_pitch_accuracy: {e}")
         import traceback
         traceback.print_exc()
         return 0.0
 
-
-# # Feature Extraction - Rhythm
 
 def extract_rhythm_features(audio, sr):
     print("Extracting rhythm features...")
@@ -837,35 +828,20 @@ def compute_final_score(pitch_accuracy, rhythm_accuracy, emotion_confidence,
 
     emotion_accuracy = emotion_confidence * 100
 
-    def apply_leniency_curve(score, leniency=1.5):
-        normalized = score / 100.0
-        leniency_power = 1.0 / leniency
-        curved = normalized ** leniency_power
-        return curved * 100.0
-
-    pitch_lenient   = apply_leniency_curve(pitch_accuracy,   leniency=1.5)
-    rhythm_lenient  = apply_leniency_curve(rhythm_accuracy,  leniency=1.5)
-    emotion_lenient = apply_leniency_curve(emotion_accuracy, leniency=1.5)
-
-    print(f"\n[LENIENCY APPLIED]")
-    print(f"  Pitch:   {pitch_accuracy:6.1f}% → {pitch_lenient:6.1f}%")
-    print(f"  Rhythm:  {rhythm_accuracy:6.1f}% → {rhythm_lenient:6.1f}%")
-    print(f"  Emotion: {emotion_accuracy:6.1f}% → {emotion_lenient:6.1f}%")
-
+    # Use linear weighted sum — leniency curves compress bad scores up toward
+    # the middle, making good and bad singers indistinguishable (both ~66-69).
+    # Minimum score removed so bad singers actually score low.
     final_score = (
-        pitch_weight   * pitch_lenient +
-        rhythm_weight  * rhythm_lenient +
-        emotion_weight * emotion_lenient
+        pitch_weight   * pitch_accuracy +
+        rhythm_weight  * rhythm_accuracy +
+        emotion_weight * emotion_accuracy
     )
-
-    minimum_score = 30.0
-    final_score = max(final_score, minimum_score)
-    final_score = np.clip(final_score, 0, 100)
+    final_score = float(np.clip(final_score, 0, 100))
 
     print(f"\n[SCORING CALCULATION]")
-    print(f"  Pitch:   {pitch_lenient:6.1f}% × {pitch_weight:.2f} = {pitch_lenient * pitch_weight:6.2f}")
-    print(f"  Rhythm:  {rhythm_lenient:6.1f}% × {rhythm_weight:.2f} = {rhythm_lenient * rhythm_weight:6.2f}")
-    print(f"  Emotion: {emotion_lenient:6.1f}% × {emotion_weight:.2f} = {emotion_lenient * emotion_weight:6.2f}")
+    print(f"  Pitch:   {pitch_accuracy:6.1f}% × {pitch_weight:.2f} = {pitch_accuracy * pitch_weight:6.2f}")
+    print(f"  Rhythm:  {rhythm_accuracy:6.1f}% × {rhythm_weight:.2f} = {rhythm_accuracy * rhythm_weight:6.2f}")
+    print(f"  Emotion: {emotion_accuracy:6.1f}% × {emotion_weight:.2f} = {emotion_accuracy * emotion_weight:6.2f}")
     print(f"\n  Final score: {final_score:6.1f}/100")
 
     return final_score
