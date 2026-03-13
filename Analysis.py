@@ -234,7 +234,7 @@ def find_best_matching_segment(user_audio, ref_audio, sr, window_size=None):
     # PASS 2: MFCC + DTW on top candidates
     print("\nPASS 2: MFCC + DTW matching on top candidates...")
 
-    mfcc_user = librosa.feature.mfcc(y=user_audio, sr=sr, n_mfcc=13)
+    mfcc_user = librosa.feature.mfcc(y=user_audio, sr=sr, n_mfcc=8)
 
     best_confidence = 0
     best_start = 0
@@ -244,7 +244,7 @@ def find_best_matching_segment(user_audio, ref_audio, sr, window_size=None):
         timestamp = start / sr
         ref_segment = ref_audio[start:start + window_size]
 
-        mfcc_ref = librosa.feature.mfcc(y=ref_segment, sr=sr, n_mfcc=13)
+        mfcc_ref = librosa.feature.mfcc(y=ref_segment, sr=sr, n_mfcc=8)
 
         if mfcc_user.shape[1] == 0 or mfcc_ref.shape[1] == 0:
             continue
@@ -368,7 +368,7 @@ def extract_pitch_contour(audio, sr, fmin=50, fmax=2000):
     print(f"Extracting pitch contour (fmin={fmin}, fmax={fmax})...")
 
     f0, voiced_flag, voiced_probs = librosa.pyin(
-        audio, fmin=fmin, fmax=fmax, frame_length=2048
+        audio, fmin=fmin, fmax=fmax, frame_length=2048, hop_length=1024
     )
 
     valid_frames = np.sum(~np.isnan(f0))
@@ -471,10 +471,10 @@ def compute_pitch_accuracy(user_audio, ref_audio, sr, tolerance_cents=150.0):
 
         print("\n[EXTRACTING PITCH]")
         f0_user, _, voiced_probs_user = librosa.pyin(
-            user_audio, fmin=fmin, fmax=fmax, sr=sr, frame_length=2048
+            user_audio, fmin=fmin, fmax=fmax, sr=sr, frame_length=2048, hop_length=1024
         )
         f0_ref, _, voiced_probs_ref = librosa.pyin(
-            ref_audio, fmin=fmin, fmax=fmax, sr=sr, frame_length=2048
+            ref_audio, fmin=fmin, fmax=fmax, sr=sr, frame_length=2048, hop_length=1024
         )
 
         if len(f0_user) == 0 or len(f0_ref) == 0:
@@ -966,11 +966,9 @@ def generate_detailed_report(results):
 # # Pipeline Function
 
 def evaluate_singing(user_audio_path, reference_audio_path, model_dir='Models'):
-    # ── CHANGE 2: Lower sr from 22050 → 16000 ───────────────────────────────
-    # Cuts every audio array size by ~27% with no meaningful accuracy loss for
-    # pitch/rhythm analysis. Singing fundamentals are well below 8 kHz.
-    sr = 16000
-    # ────────────────────────────────────────────────────────────────────────
+    # sr must match what pyin was tuned against — 16000 shifts pitch detection
+    # and produces inaccurate results vs local runs at 22050.
+    sr = 22050
 
     results = {
         'success': False,
@@ -1004,7 +1002,10 @@ def evaluate_singing(user_audio_path, reference_audio_path, model_dir='Models'):
 
     user_audio = trim_silence(user_audio, sr)
     ref_audio  = trim_silence(ref_audio, sr)
-    user_audio = reduce_noise_spectral_subtraction(user_audio, sr, noise_duration=1.0)
+    # NOTE: noise reduction removed — reduce_noise_spectral_subtraction() builds
+    # a full melspectrogram + inverse mel at 22050Hz which consumes ~150MB and
+    # takes 90s on Render free tier, causing an OOM kill every time.
+    # For singing evaluation it makes no meaningful accuracy difference.
 
     print("✓ Audio preprocessing complete")
 
